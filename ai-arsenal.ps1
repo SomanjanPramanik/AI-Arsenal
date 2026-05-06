@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.1.3"
+$Global:SC_VERSION     = "4.1.4"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -3312,6 +3312,8 @@ $artBody
             Start-Sleep -Milliseconds 60
         }
         # Final clean render
+        Clear-Host
+        Clear-Host
         try { [System.Console]::SetCursorPosition(0, $startY) } catch {}
         foreach ($line in $artLines) { Write-Host $line -ForegroundColor Green }
 
