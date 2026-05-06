@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.0.1"
+$Global:SC_VERSION     = "4.0.2"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -65,6 +65,7 @@ function _SC-DefaultConfig {
         AnimStyle   = "instant"      
         Role        = "SDET"         # Hard fallback so it never blanks out
         SetupDone   = $false
+        CloudModel  = ""
     }
 }
 
@@ -83,23 +84,34 @@ function _SC-LoadConfig {
     # Integrity check: force setup if critical fields are blank
     if ($cfg.SetupDone -and ([string]::IsNullOrWhiteSpace($cfg.UserName) -or [string]::IsNullOrWhiteSpace($cfg.Role))) {
         $cfg.SetupDone = $false
-        $cfg.Role = "SDET"
-        _SC-SaveConfig $cfg | Out-Null
+        if ([string]::IsNullOrWhiteSpace($cfg.Role)) { $cfg.Role = "SDET" }
+        # Do NOT wipe City or other fields here
     }
+    $cfg['MaxChars'] = [int]$cfg['MaxChars']
     $Global:SC_MODEL = $cfg.LocalModel
     return $cfg
 }
 
 function _SC-SaveConfig {
-    param($Config)  # Removed [hashtable] restriction to prevent PS 5.1 key-dropping
+    param($Config)
     try {
-        $safe = [ordered]@{}
-        foreach ($k in $Config.Keys) {
-            $v = $Config[$k]
-            if ($v -is [string]) {
-                $v = $v -replace '[\x00-\x1F]', ''   # Only strip invisible control chars
+        $safe = [ordered]@{
+            UserName    = [string]$Config['UserName']
+            AIMode      = [string]$Config['AIMode']
+            APIKey      = [string]$Config['APIKey']
+            APIProvider = [string]$Config['APIProvider']
+            LocalModel  = [string]$Config['LocalModel']
+            MaxChars    = $Config['MaxChars']
+            City        = [string]$Config['City']
+            AnimStyle   = [string]$Config['AnimStyle']
+            Role        = [string]$Config['Role']
+            SetupDone   = $Config['SetupDone']
+            CloudModel  = ""
+        }
+        foreach ($k in @($safe.Keys)) {
+            if ($safe[$k] -is [string]) {
+                $safe[$k] = $safe[$k] -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
             }
-            $safe[$k] = $v
         }
         $safe | ConvertTo-Json -Depth 3 | Set-Content $Global:SC_CONFIG_FILE -Encoding UTF8 -Force
         return $true
@@ -298,7 +310,10 @@ function ai-setup {
     Write-Host "        Current: $(if($cfg.City){"'$($cfg.City)'"} else {'(not set — ai-weather will not work)'})" -ForegroundColor DarkGray
     Write-Host "  › " -NoNewline -ForegroundColor White
     $city = (Read-Host).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($city)) { $cfg.City = $city }
+    if (-not [string]::IsNullOrWhiteSpace($city)) {
+        $cfg.City = $city
+        Write-Host "  [~] City set to: '$city'" -ForegroundColor DarkGray
+    }
 
     # ── [5/5] ANIMATION ──────────────────────────────────────────────────
     Write-Host ""
@@ -486,7 +501,7 @@ function _SC-CallCloud {
 
     if ($cfg.APIProvider -eq "anthropic") {
         $body = @{
-            model      = "claude-3-5-sonnet-20241022"
+            model      = if ($cfg.CloudModel) { $cfg.CloudModel } else { "claude-3-5-sonnet-20241022" }
             max_tokens = $MaxTok
             system     = $System
             messages   = @(@{ role = "user"; content = $Prompt })
@@ -617,7 +632,7 @@ function _SC-Ask {
 
     # ── CLOUD PATH ────────────────────────────────────────────────────────
     if ($cfg.AIMode -eq "cloud") {
-        $p    = if ($FallbackPrompt -ne "") { $FallbackPrompt } else { $Prompt }
+        $p    = $Prompt
         $resp = _SC-CallCloud -Prompt $p -System $System
         if (-not [string]::IsNullOrWhiteSpace($resp) -and -not $Silent) {
             Write-Host ""; Write-Host $resp -ForegroundColor Green; Write-Host ""
@@ -735,7 +750,7 @@ except Exception as e:
 "@
             $tmp = Join-Path $env:TEMP "sc_read_pdf.py"
             $pyScript | Set-Content $tmp -Encoding UTF8
-            $out = (python $tmp $Path 2>&1) -join "`n"
+            $out = (& python $tmp $Path 2>&1) -join "`n"
             if ($out -match "ModuleNotFoundError|No module named 'fitz'") {
                 Write-Host ""
                 Write-Host "  [✗] PyMuPDF is not installed — needed to read PDF files." -ForegroundColor Red
@@ -765,7 +780,7 @@ except Exception as e:
 "@
             $tmp = Join-Path $env:TEMP "sc_read_docx.py"
             $pyScript | Set-Content $tmp -Encoding UTF8
-            $out = (python $tmp $Path 2>&1) -join "`n"
+            $out = (& python $tmp $Path 2>&1) -join "`n"
             if ($out -match "ModuleNotFoundError|No module named 'docx'") {
                 Write-Host ""
                 Write-Host "  [✗] python-docx is not installed — needed to read .docx files." -ForegroundColor Red
@@ -932,9 +947,10 @@ function ai-chat {
 
         # Build prompt from turn history — trim oldest turns when too long
         $histStr = ($turns | ForEach-Object { "$($_.role.ToUpper()): $($_.content)" }) -join "`n`n"
-        while ($histStr.Length -gt $Global:SC_MAX_CHARS -and $turns.Count -gt 2) {
-            $turns.RemoveAt(0)   # drop oldest turn
-            $histStr = ($turns | ForEach-Object { "$($_.role.ToUpper()): $($_.content)" }) -join "`n`n"
+        while ($histStr.Length -gt $Global:SC_MAX_CHARS) {
+         if ($turns.Count -le 2) { break }
+         $turns.RemoveAt(0)
+         $histStr = ($turns | ForEach-Object { "$($_.role.ToUpper()): $($_.content)" }) -join "`n`n"
         }
 
         _SC-AutoFlushIfNeeded
@@ -1085,8 +1101,11 @@ function ai-folder {
     }
     $supported = @("*.java","*.py","*.ps1","*.js","*.ts","*.cs","*.xml","*.json",
                    "*.txt","*.md","*.html","*.css","*.yaml","*.yml","*.go","*.rb","*.rs","*.sh")
-    $files = Get-ChildItem -Path $Path -Recurse -Include $supported -File -EA SilentlyContinue |
-             Select-Object -First 30
+   $allFiles = Get-ChildItem -Path $Path -Recurse -Include $supported -File -EA SilentlyContinue
+   $files    = $allFiles | Select-Object -First 30
+   if ($allFiles.Count -gt 30) {
+        Write-Host "  [~] Showing first 30 of $($allFiles.Count) files." -ForegroundColor Yellow
+   }
     if ($files.Count -eq 0) {
         Write-Host ""
         Write-Host "  [~] No supported code files found in: $Path" -ForegroundColor Yellow
@@ -1224,7 +1243,7 @@ function ai-fix {
         Write-Host ""
         return
     }
-    $backup = "$Path.bak_$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $backup = "$Path.bak_$(Get-Date -Format 'yyyyMMddHHmmssff')"
     try {
         Copy-Item $Path $backup -EA Stop
         Write-Host "  [✓] Backup saved: $backup" -ForegroundColor DarkGray
@@ -1281,7 +1300,7 @@ function ai-img {
     if ($ext -eq ".pdf") {
         Write-Host "  [~] PDF detected — rendering page 1 as image..." -ForegroundColor DarkGray
         $tempImg = Join-Path $env:TEMP "ai_pdf_temp.png"
-        $out = python -c "import fitz,sys; doc=fitz.open(sys.argv[1]); pix=doc.load_page(0).get_pixmap(dpi=150); pix.save(sys.argv[2])" $Path $tempImg 2>&1
+        $out = & python -c "import fitz,sys; doc=fitz.open(sys.argv[1]); pix=doc.load_page(0).get_pixmap(dpi=150); pix.save(sys.argv[2])" $Path $tempImg 2>&1
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tempImg)) {
             Write-Host ""
             Write-Host "  [✗] Could not render the PDF to an image." -ForegroundColor Red
@@ -1413,7 +1432,7 @@ function ai-ocr {
     if ([System.IO.Path]::GetExtension($Path).ToLower() -eq ".pdf") {
         Write-Host "  [~] Converting PDF page 1 to image..." -ForegroundColor DarkGray
         $target = Join-Path $env:TEMP "sc_ocr_temp.png"
-        python -c "import fitz,sys; doc=fitz.open(sys.argv[1]); pix=doc.load_page(0).get_pixmap(dpi=150); pix.save(sys.argv[2])" $Path $target 2>&1 | Out-Null
+        & python -c "import fitz,sys; doc=fitz.open(sys.argv[1]); pix=doc.load_page(0).get_pixmap(dpi=150); pix.save(sys.argv[2])" $Path $target 2>&1 | Out-Null
         if (-not (Test-Path $target)) {
             Write-Host "  [✗] Could not convert PDF. Fix: pip install PyMuPDF" -ForegroundColor Red; return
         }
@@ -1712,7 +1731,7 @@ $c
 function _SC-GitCheck {
     # Returns $true if inside a git repo, prints fix guide and returns $false otherwise
     $check = git rev-parse --is-inside-work-tree 2>&1
-    if ($check -ne "true") {
+    if (($check).Trim() -ne "true") {
         Write-Host ""
         Write-Host "  [✗] You are not inside a Git repository." -ForegroundColor Red
         Write-Host "      Navigate to your project folder first:  cd C:\your\project" -ForegroundColor DarkGray
@@ -1791,6 +1810,9 @@ function ai-git-push {
     Write-Host "  ── Changed files ──────────────────────────────────" -ForegroundColor DarkGray
     git status --short | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     Write-Host ""
+    Write-Host "  Stage all changes? [Y/N] " -NoNewline -ForegroundColor Yellow
+    $stageChoice = (Read-Host).Trim().ToUpper()
+    if ($stageChoice -ne "Y") { Write-Host "  [Skipped] Nothing staged." -ForegroundColor DarkGray; return }
     git add .
     $diff = _SC-Trim (git diff --staged 2>&1) 8000
     Write-Host "  Generating commit message..." -ForegroundColor DarkGray
@@ -2333,7 +2355,7 @@ function ai-done {
     if ($t.done) {
         Write-Host "  [~] TODO #$Id is already marked done: '$($t.task)'" -ForegroundColor DarkGray; return
     }
-    $t.done = $true
+    $t | Add-Member -Force -NotePropertyName done -NotePropertyValue $true
     _SC-SaveJson $f $todos
     Write-Host "  [✓] Done: $($t.task)" -ForegroundColor Green
     $remaining = @($todos | Where-Object { -not $_.done }).Count
@@ -2660,7 +2682,7 @@ function ai-standup {
 
     $gitAuthor = git config user.name 2>$null
     $gitLog    = if ([string]::IsNullOrWhiteSpace($gitAuthor)) { "(git not configured — run: git config user.name `"Your Name`")" } else {
-        $log = git log --oneline --since="yesterday" --author="$gitAuthor" 2>$null
+        $log = git log --oneline --since="24 hours ago" --author="$gitAuthor" 2>$null
         if ([string]::IsNullOrWhiteSpace($log)) { "(no commits since yesterday)" } else { $log }
     }
     $gitDiff  = if ([string]::IsNullOrWhiteSpace($gitAuthor)) { "" } else {
@@ -3104,7 +3126,16 @@ function ai-help {
     $animStyle = if ($Quick) { "instant" } else { $cfg.AnimStyle }
 
     # ── ASCII FONT ENGINE ─────────────────────────────────────────────────
-    $font = @{
+    $font = @{'0'=@(' █████ ','██   ██','██   ██','██   ██',' █████ ')
+        '1'=@(' ██','███',' ██',' ██','███')
+        '2'=@('██████ ','     ██',' █████ ','██     ','███████')
+        '3'=@('██████ ','     ██',' █████ ','     ██','██████ ')
+        '4'=@('██   ██','██   ██','███████','     ██','     ██')
+        '5'=@('███████','██     ','██████ ','     ██','██████ ')
+        '6'=@(' █████ ','██     ','██████ ','██   ██',' █████ ')
+        '7'=@('███████','     ██','    ██ ','   ██  ','  ██   ')
+        '8'=@(' █████ ','██   ██',' █████ ','██   ██',' █████ ')
+        '9'=@(' █████ ','██   ██',' ██████','     ██',' █████ ')
         'A'=@(' █████ ','██   ██','███████','██   ██','██   ██')
         'B'=@('██████ ','██   ██','██████ ','██   ██','██████ ')
         'C'=@(' ██████','██     ','██     ','██     ',' ██████')
@@ -3134,11 +3165,15 @@ function ai-help {
         ' '=@('   ','   ','   ','   ','   ')
     }
 
-    $cleanName = ($userName.ToUpper() -replace '[^A-Z ]', '')
+    $cleanName = ($userName.ToUpper() -replace '[^A-Z0-9 ]', '')
     $nameLines = @("","","","","")
     foreach ($char in $cleanName.ToCharArray()) {
         $letter = $font[$char.ToString()]
-        if ($null -eq $letter) { $letter = $font[' '] }
+           if ($null -eq $letter) { 
+                 Write-Host "  [~] Note: character '$char' not in font map, skipping." -ForegroundColor DarkGray
+                 continue 
+            }
+    
         for ($i = 0; $i -lt 5; $i++) { $nameLines[$i] += $letter[$i] + " " }
     }
     $artBody = ""
@@ -3154,41 +3189,55 @@ $artBody
   ════════════════════════════════════════════════════════════════════════════
 "@
 
+    $artLines = $art -split "`n"
     if ($animStyle -eq "glitch") {
-        for ($i = 0; $i -lt 3; $i++) {
-            $label = @("CORE","MODELS","ARSENAL")[$i]
+        # Boot sequence
+        foreach ($label in @("CORE","MODELS","ARSENAL")) {
             Write-Host -NoNewline "  $($label.PadRight(10)) ["
-            for ($j = 0; $j -lt 28; $j++) { Write-Host "█" -NoNewline -ForegroundColor Green; Start-Sleep -Milliseconds 6 }
-            Write-Host "]  " -NoNewline; Write-Host "OK" -ForegroundColor Green
+            for ($j = 0; $j -lt 28; $j++) {
+                Write-Host "█" -NoNewline -ForegroundColor Green
+                Start-Sleep -Milliseconds 6
+            }
+            Write-Host "] OK" -ForegroundColor Green
         }
-        Start-Sleep -Milliseconds 60; Clear-Host; Start-Sleep -Milliseconds 40
-        $lines  = $art -split "`n"
-        foreach ($l in $lines) { Write-Host "" }
-        $startY = [System.Console]::CursorTop - $lines.Count
+        Start-Sleep -Milliseconds 120
+        Clear-Host
+
+        # Print placeholder lines so we can overwrite them
+        foreach ($line in $artLines) { Write-Host "" }
+        $startY = [System.Console]::CursorTop - $artLines.Count
         if ($startY -lt 0) { $startY = 0 }
-        $sw     = [System.Diagnostics.Stopwatch]::StartNew()
-        $chars  = [char[]]"01XYZ#@%&*ABCDEFGHIJKLMNOPQRSTUVWXYZ▓▒░"
-        while ($sw.ElapsedMilliseconds -lt 3200) {
-            [System.Console]::SetCursorPosition(0, $startY)
-            $progress = $sw.ElapsedMilliseconds / 3200.0
-            $glitch   = 90 - (90 * $progress)
-            foreach ($line in $lines) {
+
+        $glitchChars = [char[]]"01XYZ#@%&*ABCDEFGHIJKLMNOPQRSTUVWXYZ▓▒░"
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $totalMs = 3000
+
+        while ($sw.ElapsedMilliseconds -lt $totalMs) {
+            $progress = [double]$sw.ElapsedMilliseconds / $totalMs
+            $glitchPct = [int](90 - (90 * $progress))
+            try { [System.Console]::SetCursorPosition(0, $startY) } catch { break }
+            foreach ($line in $artLines) {
                 if ([string]::IsNullOrWhiteSpace($line)) { Write-Host ""; continue }
                 $arr = $line.ToCharArray()
-                for ($i = 0; $i -lt $arr.Length; $i++) {
-                    if ($arr[$i] -ne ' ' -and (Get-Random -Max 100) -lt $glitch) {
-                        $arr[$i] = $chars | Get-Random
+                for ($ci = 0; $ci -lt $arr.Length; $ci++) {
+                    if ($arr[$ci] -ne ' ' -and ((Get-Random -Max 100) -lt $glitchPct)) {
+                        $arr[$ci] = $glitchChars[(Get-Random -Max $glitchChars.Count)]
                     }
                 }
                 Write-Host (-join $arr) -ForegroundColor Green
             }
-            Start-Sleep -Milliseconds 55
+            Start-Sleep -Milliseconds 60
         }
-        [System.Console]::SetCursorPosition(0, $startY)
-        foreach ($line in $lines) { Write-Host $line -ForegroundColor Green }
+        # Final clean render
+        try { [System.Console]::SetCursorPosition(0, $startY) } catch {}
+        foreach ($line in $artLines) { Write-Host $line -ForegroundColor Green }
+
     } elseif ($animStyle -eq "typewriter") {
-        $art -split "`n" | ForEach-Object {
-            $_.ToCharArray() | ForEach-Object { Write-Host $_ -NoNewline -ForegroundColor Green; Start-Sleep -Milliseconds 1 }
+        foreach ($line in $artLines) {
+            foreach ($ch in $line.ToCharArray()) {
+                Write-Host $ch -NoNewline -ForegroundColor Green
+                Start-Sleep -Milliseconds 2
+            }
             Write-Host ""
         }
     } else {
