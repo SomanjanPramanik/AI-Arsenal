@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.1.0"
+$Global:SC_VERSION     = "4.1.1"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -53,59 +53,61 @@ $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
 #  CONFIG — LOAD / SAVE
 # ════════════════════════════════════════════════════════════════════════════
 
-function _SC-DefaultConfig {
-    return [ordered]@{
+function _SC-LoadConfig {
+    # 1. The master blueprint (including City and AnimStyle)
+    $defaults = [ordered]@{
         UserName    = "User"
-        AIMode      = "local"        # "local" | "cloud"
+        AIMode      = "local"
         APIKey      = ""
-        APIProvider = ""             
-        LocalModel  = "gemma2:2b"    # Defaulting to lighter model to prevent crashing
+        APIProvider = ""
+        LocalModel  = "gemma2:2b"
         MaxChars    = 12000
         City        = ""
-        AnimStyle   = "instant"      
-        Role        = "SDET"         # Hard fallback so it never blanks out
+        AnimStyle   = "instant"
+        Role        = "SDET"
         SetupDone   = $false
         CloudModel  = ""
     }
-}
 
-function _SC-LoadConfig {
-    $cfg = _SC-DefaultConfig
+    # 2. Read the JSON file
     if (Test-Path $Global:SC_CONFIG_FILE) {
         try {
-            $raw = Get-Content $Global:SC_CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-            foreach ($key in $cfg.Keys) {
-                if ($null -ne $raw.$key -and $raw.$key -ne "") {
-                    $cfg[$key] = $raw.$key
-                }
-            }
-        } catch { }
+            $json = Get-Content $Global:SC_CONFIG_FILE -Raw | ConvertFrom-Json
+            
+            # 3. Force-map every variable into memory so they can't be dropped
+            if ($null -ne $json.UserName)    { $defaults.UserName    = $json.UserName }
+            if ($null -ne $json.AIMode)      { $defaults.AIMode      = $json.AIMode }
+            if ($null -ne $json.APIKey)      { $defaults.APIKey      = $json.APIKey }
+            if ($null -ne $json.APIProvider) { $defaults.APIProvider = $json.APIProvider }
+            if ($null -ne $json.LocalModel)  { $defaults.LocalModel  = $json.LocalModel }
+            if ($null -ne $json.MaxChars)    { $defaults.MaxChars    = $json.MaxChars }
+            if ($null -ne $json.City)        { $defaults.City        = $json.City }
+            if ($null -ne $json.AnimStyle)   { $defaults.AnimStyle   = $json.AnimStyle }
+            if ($null -ne $json.Role)        { $defaults.Role        = $json.Role }
+            if ($null -ne $json.SetupDone)   { $defaults.SetupDone   = $json.SetupDone }
+        } catch { 
+            # If the file is corrupted, it safely falls back to defaults
+        }
     }
-    # Integrity check: force setup if critical fields are blank
-    if ($cfg.SetupDone -and ([string]::IsNullOrWhiteSpace($cfg.UserName) -or [string]::IsNullOrWhiteSpace($cfg.Role))) {
-        $cfg.SetupDone = $false
-        if ([string]::IsNullOrWhiteSpace($cfg.Role)) { $cfg.Role = "SDET" }
-        # Do NOT wipe City or other fields here
-    }
-    $cfg['MaxChars'] = [int]$cfg['MaxChars']
-    $Global:SC_MODEL = $cfg.LocalModel
-    return $cfg
+    
+    # Return the fully loaded object
+    return [PSCustomObject]$defaults
 }
 
 function _SC-SaveConfig {
     param($Config)
     try {
         $safe = [ordered]@{
-            UserName    = [string]$Config['UserName']
-            AIMode      = [string]$Config['AIMode']
-            APIKey      = [string]$Config['APIKey']
-            APIProvider = [string]$Config['APIProvider']
-            LocalModel  = [string]$Config['LocalModel']
-            MaxChars    = $Config['MaxChars']
-            City        = [string]$Config['City']
-            AnimStyle   = [string]$Config['AnimStyle']
-            Role        = [string]$Config['Role']
-            SetupDone   = $Config['SetupDone']
+            UserName    = [string]$Config.UserName
+            AIMode      = [string]$Config.AIMode
+            APIKey      = [string]$Config.APIKey
+            APIProvider = [string]$Config.APIProvider
+            LocalModel  = [string]$Config.LocalModel
+            MaxChars    = $Config.MaxChars
+            City        = [string]$Config.City
+            AnimStyle   = [string]$Config.AnimStyle
+            Role        = [string]$Config.Role
+            SetupDone   = $Config.SetupDone
             CloudModel  = ""
         }
         foreach ($k in @($safe.Keys)) {
@@ -403,12 +405,23 @@ function _SC-AutoFlushIfNeeded {
 }
 
 function _SC-FlushVRAM {
-    $infer = Get-Process "ollama_llama_server", "llama-server" -EA SilentlyContinue
-    if ($infer) {
-        $infer | Stop-Process -Force -EA SilentlyContinue
-        Start-Sleep -Seconds 2
-        Write-Host "  [✓] VRAM flushed. Model will reload on your next request." -ForegroundColor DarkGray
+    # Kill known inference runners by name
+    $procs = Get-Process "ollama_llama_server", "llama-server" -EA SilentlyContinue
+    if ($procs) {
+        $procs | Stop-Process -Force -EA SilentlyContinue
+        Start-Sleep -Seconds 1
     }
+
+    # Surgical strike: kill whatever is holding port 11434 (catches renamed/zombie PIDs)
+    try {
+        $portProc = Get-NetTCPConnection -LocalPort 11434 -State Listen -EA SilentlyContinue
+        if ($portProc) {
+            Stop-Process -Id $portProc.OwningProcess -Force -EA SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
+    } catch {}
+
+    Write-Host "  [✓] VRAM flushed. Port 11434 cleared." -ForegroundColor DarkGray
 }
 
 function _SC-OllamaReachable {
@@ -607,7 +620,7 @@ function _SC-CallCloud {
 function _SC-CallOllama {
     <#
     Calls a local Ollama model. Returns response string or "" on failure.
-    On 500 / timeout: flushes VRAM and returns "" — caller handles retry.
+    On 500 / timeout / CUDA error: flushes VRAM and returns "" — caller handles retry.
     #>
     param(
         [string]$Prompt,
@@ -616,6 +629,15 @@ function _SC-CallOllama {
         [float] $Temp   = 0.4
     )
     if ([string]::IsNullOrWhiteSpace($System)) { $System = _SC-SystemPrompt }
+
+    # Pre-flight: warn if model is too large for available VRAM (GTX 1650 = 4GB)
+    try {
+        $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "NVIDIA" }
+        $vramGB = [math]::Round($gpu.AdapterRAM / 1GB)
+        if ($Model -match "7b|8b|13b" -and $vramGB -lt 6) {
+            Write-Host "  [!] '$Model' exceeds ${vramGB}GB VRAM — running on system RAM (expect slower response)." -ForegroundColor DarkYellow
+        }
+    } catch {}
 
     $body = @{
         model   = $Model
@@ -631,7 +653,11 @@ function _SC-CallOllama {
         return $r.response
     } catch {
         $e = $_.Exception.Message
-        if ($e -match "500|timeout|Timeout|connection|refused") {
+        if ($e -match "CUDA error|shared object") {
+            Write-Host "  [!] CUDA lock detected — auto-flushing..." -ForegroundColor Red
+            Write-Host "      If this repeats: press Win+Ctrl+Shift+B to reset your NVIDIA driver." -ForegroundColor DarkGray
+            _SC-FlushVRAM
+        } elseif ($e -match "500|timeout|Timeout|connection|refused") {
             Write-Host "  [~] Model '$Model' crashed or timed out. Flushing VRAM..." -ForegroundColor Yellow
             _SC-FlushVRAM
         } else {
