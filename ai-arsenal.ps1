@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.0.2"
+$Global:SC_VERSION     = "4.1.0"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -480,6 +480,8 @@ function _SC-CallCloud {
     <#
     Calls Anthropic or OpenAI. Returns response string or "" on failure.
     Caller decides whether to print.
+    Includes exponential backoff retry (3 attempts) for transient failures.
+    Fatal errors (401/403/400/auth) skip retries immediately.
     #>
     param(
         [string]$Prompt,
@@ -499,6 +501,9 @@ function _SC-CallCloud {
         return ""
     }
 
+    $maxRetries = 3
+
+    # ── ANTHROPIC ─────────────────────────────────────────────────────────
     if ($cfg.APIProvider -eq "anthropic") {
         $body = @{
             model      = if ($cfg.CloudModel) { $cfg.CloudModel } else { "claude-3-5-sonnet-20241022" }
@@ -506,35 +511,47 @@ function _SC-CallCloud {
             system     = $System
             messages   = @(@{ role = "user"; content = $Prompt })
         } | ConvertTo-Json -Depth 10 -Compress
-        try {
-            $r = Invoke-RestMethod -Uri "https://api.anthropic.com/v1/messages" -Method POST `
-                -Headers @{
-                    "x-api-key"         = $cfg.APIKey
-                    "anthropic-version" = "2023-06-01"
-                    "content-type"      = "application/json"
-                } -Body $body -TimeoutSec 90 -EA Stop
-            return $r.content[0].text
-        } catch {
-            $e = $_.Exception.Message
-            Write-Host ""
-            Write-Host "  [✗] Anthropic API error." -ForegroundColor Red
-            if ($e -match "401|invalid_api_key|authentication") {
-                Write-Host "      Your API key is wrong or expired." -ForegroundColor Yellow
-                Write-Host "      Fix: ai-setup  →  re-enter your Anthropic key." -ForegroundColor Cyan
-            } elseif ($e -match "429|rate_limit|quota") {
-                Write-Host "      You've hit your rate limit or billing quota." -ForegroundColor Yellow
-                Write-Host "      Fix: wait 60 s, or check console.anthropic.com for billing." -ForegroundColor Cyan
-            } elseif ($e -match "timeout|Timeout") {
-                Write-Host "      Request timed out (> 90 s)." -ForegroundColor Yellow
-                Write-Host "      Fix: check your internet connection and retry." -ForegroundColor Cyan
-            } else {
-                Write-Host "      Detail: $e" -ForegroundColor DarkGray
+
+        $delay = 2
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $r = Invoke-RestMethod -Uri "https://api.anthropic.com/v1/messages" -Method POST `
+                    -Headers @{
+                        "x-api-key"         = $cfg.APIKey
+                        "anthropic-version" = "2023-06-01"
+                        "content-type"      = "application/json"
+                    } -Body $body -TimeoutSec 90 -EA Stop
+                return $r.content[0].text
+            } catch {
+                $e = $_.Exception.Message
+                $isFatal = $e -match "401|403|400|invalid_api_key|authentication|permission"
+                if ($attempt -lt $maxRetries -and -not $isFatal) {
+                    Write-Host "  [~] Anthropic attempt $attempt/$maxRetries failed. Retrying in ${delay}s..." -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $delay
+                    $delay *= 2
+                } else {
+                    Write-Host ""
+                    Write-Host "  [✗] Anthropic API error." -ForegroundColor Red
+                    if ($isFatal) {
+                        Write-Host "      This is a permanent failure. Check your API key via  ai-setup." -ForegroundColor Yellow
+                    } elseif ($e -match "429|rate_limit|quota") {
+                        Write-Host "      Rate limit or billing quota hit." -ForegroundColor Yellow
+                        Write-Host "      Fix: wait 60 s, or check console.anthropic.com for billing." -ForegroundColor Cyan
+                    } elseif ($e -match "timeout|Timeout") {
+                        Write-Host "      Request timed out after 3 attempts." -ForegroundColor Yellow
+                        Write-Host "      Fix: check your internet connection and retry." -ForegroundColor Cyan
+                    } else {
+                        Write-Host "      Detail: $e" -ForegroundColor DarkGray
+                    }
+                    Write-Host ""
+                    return ""
+                }
             }
-            Write-Host ""
-            return ""
         }
+        return ""
     }
 
+    # ── OPENAI ────────────────────────────────────────────────────────────
     if ($cfg.APIProvider -eq "openai") {
         $body = @{
             model    = "gpt-4o"
@@ -543,29 +560,43 @@ function _SC-CallCloud {
                 @{ role = "user";   content = $Prompt }
             )
         } | ConvertTo-Json -Depth 10 -Compress
-        try {
-            $r = Invoke-RestMethod -Uri "https://api.openai.com/v1/chat/completions" -Method POST `
-                -Headers @{
-                    "Authorization" = "Bearer $($cfg.APIKey)"
-                    "Content-Type"  = "application/json"
-                } -Body $body -TimeoutSec 90 -EA Stop
-            return $r.choices[0].message.content
-        } catch {
-            $e = $_.Exception.Message
-            Write-Host ""
-            Write-Host "  [✗] OpenAI API error." -ForegroundColor Red
-            if ($e -match "401|invalid_api_key") {
-                Write-Host "      Your API key is wrong or expired." -ForegroundColor Yellow
-                Write-Host "      Fix: ai-setup  →  re-enter your OpenAI key." -ForegroundColor Cyan
-            } elseif ($e -match "429|quota") {
-                Write-Host "      Rate limit or quota exceeded." -ForegroundColor Yellow
-                Write-Host "      Fix: wait a moment or check platform.openai.com for billing." -ForegroundColor Cyan
-            } else {
-                Write-Host "      Detail: $e" -ForegroundColor DarkGray
+
+        $delay = 2
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $r = Invoke-RestMethod -Uri "https://api.openai.com/v1/chat/completions" -Method POST `
+                    -Headers @{
+                        "Authorization" = "Bearer $($cfg.APIKey)"
+                        "Content-Type"  = "application/json"
+                    } -Body $body -TimeoutSec 90 -EA Stop
+                return $r.choices[0].message.content
+            } catch {
+                $e = $_.Exception.Message
+                $isFatal = $e -match "401|403|400|invalid_api_key|authentication|permission"
+                if ($attempt -lt $maxRetries -and -not $isFatal) {
+                    Write-Host "  [~] OpenAI attempt $attempt/$maxRetries failed. Retrying in ${delay}s..." -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $delay
+                    $delay *= 2
+                } else {
+                    Write-Host ""
+                    Write-Host "  [✗] OpenAI API error." -ForegroundColor Red
+                    if ($isFatal) {
+                        Write-Host "      This is a permanent failure. Check your API key via  ai-setup." -ForegroundColor Yellow
+                    } elseif ($e -match "429|quota") {
+                        Write-Host "      Rate limit or quota exceeded." -ForegroundColor Yellow
+                        Write-Host "      Fix: wait a moment or check platform.openai.com for billing." -ForegroundColor Cyan
+                    } elseif ($e -match "timeout|Timeout") {
+                        Write-Host "      Request timed out after 3 attempts." -ForegroundColor Yellow
+                        Write-Host "      Fix: check your internet connection and retry." -ForegroundColor Cyan
+                    } else {
+                        Write-Host "      Detail: $e" -ForegroundColor DarkGray
+                    }
+                    Write-Host ""
+                    return ""
+                }
             }
-            Write-Host ""
-            return ""
         }
+        return ""
     }
 
     Write-Host "  [✗] No cloud provider is configured." -ForegroundColor Red
