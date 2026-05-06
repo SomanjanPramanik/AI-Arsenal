@@ -1,5 +1,5 @@
 # ════════════════════════════════════════════════════════════════════════════
-#  AI ARSENAL  ·  PUBLIC EDITION  v4.0
+#  AI ARSENAL  ·  PUBLIC EDITION  
 #  Author : Somanjan
 #  GitHub : https://github.com/SomanjanPramanik/AI-Arsenal  
 # ════════════════════════════════════════════════════════════════════════════
@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.0"
+$Global:SC_VERSION     = "4.0.1"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -55,15 +55,15 @@ $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
 
 function _SC-DefaultConfig {
     return [ordered]@{
-        UserName    = ""
+        UserName    = "User"
         AIMode      = "local"        # "local" | "cloud"
         APIKey      = ""
-        APIProvider = ""             # "anthropic" | "openai"
-        LocalModel  = "mistral:latest"
+        APIProvider = ""             
+        LocalModel  = "gemma2:2b"    # Defaulting to lighter model to prevent crashing
         MaxChars    = 12000
         City        = ""
-        AnimStyle   = "instant"      # "glitch" | "typewriter" | "instant"
-        Role        = ""
+        AnimStyle   = "instant"      
+        Role        = "SDET"         # Hard fallback so it never blanks out
         SetupDone   = $false
     }
 }
@@ -73,35 +73,31 @@ function _SC-LoadConfig {
     if (Test-Path $Global:SC_CONFIG_FILE) {
         try {
             $raw = Get-Content $Global:SC_CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-            # Only copy known, expected keys — never blindly trust file content
             foreach ($key in $cfg.Keys) {
                 if ($null -ne $raw.$key -and $raw.$key -ne "") {
                     $cfg[$key] = $raw.$key
                 }
             }
-        } catch {
-            # Silently fall back to defaults — corrupt config is not fatal
-        }
+        } catch { }
     }
-    # Integrity check: if setup claimed done but name is blank, redo setup
-    if ($cfg.SetupDone -and [string]::IsNullOrWhiteSpace($cfg.UserName)) {
+    # Integrity check: force setup if critical fields are blank
+    if ($cfg.SetupDone -and ([string]::IsNullOrWhiteSpace($cfg.UserName) -or [string]::IsNullOrWhiteSpace($cfg.Role))) {
         $cfg.SetupDone = $false
+        $cfg.Role = "SDET"
         _SC-SaveConfig $cfg | Out-Null
     }
-    # Sync the one global that inner functions occasionally read directly
     $Global:SC_MODEL = $cfg.LocalModel
     return $cfg
 }
 
 function _SC-SaveConfig {
-    param([hashtable]$Config)
+    param($Config)  # Removed [hashtable] restriction to prevent PS 5.1 key-dropping
     try {
-        # Sanitize string values: strip control chars and double-quotes to keep JSON clean
         $safe = [ordered]@{}
         foreach ($k in $Config.Keys) {
             $v = $Config[$k]
             if ($v -is [string]) {
-                $v = $v -replace '[\x00-\x1F"\\]', ''   # strip control + JSON-breaking chars
+                $v = $v -replace '[\x00-\x1F]', ''   # Only strip invisible control chars
             }
             $safe[$k] = $v
         }
@@ -109,8 +105,6 @@ function _SC-SaveConfig {
         return $true
     } catch {
         Write-Host "  [!] Could not save config: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "      Your settings will work this session but won't persist." -ForegroundColor DarkGray
-        Write-Host "      Fix: make sure $env:TEMP is writable." -ForegroundColor DarkCyan
         return $false
     }
 }
@@ -176,11 +170,11 @@ function ai-setup {
     $cfg = _SC-LoadConfig
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║       AI ARSENAL  v$($Global:SC_VERSION)  —  SETUP WIZARD        ║" -ForegroundColor Cyan
-    Write-Host "  ║  All settings are stored locally on this PC.    ║" -ForegroundColor DarkGray
-    Write-Host "  ║  Run  ai-setup  again anytime to reconfigure.   ║" -ForegroundColor DarkGray
-    Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "         AI ARSENAL  v$($Global:SC_VERSION)  —  SETUP WIZARD       " -ForegroundColor Cyan
+    Write-Host "    All settings are stored locally on this PC.     " -ForegroundColor DarkGray
+    Write-Host "    Run  ai-setup  again anytime to reconfigure.    " -ForegroundColor DarkGray
+    Write-Host "  ════════════════════════════════════════════════" -ForegroundColor Cyan
     Write-Host ""
 
     # ── [1/5] NAME ───────────────────────────────────────────────────────
