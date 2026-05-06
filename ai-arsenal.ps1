@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.1.1"
+$Global:SC_VERSION     = "4.1.2"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -72,7 +72,7 @@ function _SC-LoadConfig {
     # 2. Read the JSON file
     if (Test-Path $Global:SC_CONFIG_FILE) {
         try {
-            $json = Get-Content $Global:SC_CONFIG_FILE -Raw | ConvertFrom-Json
+            $json = Get-Content $Global:SC_CONFIG_FILE -Raw -EA SilentlyContinue | ConvertFrom-Json
             
             # 3. Force-map every variable into memory so they can't be dropped
             if ($null -ne $json.UserName)    { $defaults.UserName    = $json.UserName }
@@ -2116,8 +2116,14 @@ function ai-flashcard {
     $stats = @{}
     if (Test-Path $statsFile) {
         try {
-            (Get-Content $statsFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
-                ForEach-Object { $stats[$_.Name] = [int]$_.Value }
+            # 1. Safely read the file first (silences lock errors)
+            $statsData = Get-Content $statsFile -Raw -Encoding UTF8 -EA SilentlyContinue
+            
+            # 2. Only attempt to parse if the file actually returned data
+            if (-not [string]::IsNullOrWhiteSpace($statsData)) {
+                (ConvertFrom-Json $statsData).PSObject.Properties | 
+                    ForEach-Object { $stats[$_.Name] = [int]$_.Value }
+            }
         } catch { $stats = @{} }
     }
 
@@ -2267,20 +2273,40 @@ $(_SC-Trim $jd 8000)
 # ════════════════════════════════════════════════════════════════════════════
 
 function _SC-LoadJson {
-    param([string]$Path, [string]$DefaultType = "array")
+    param(
+        [string]$Path, 
+        [ValidateSet("array", "hashtable")]
+        [string]$DefaultType = "array"
+    )
+
+    # Helper scriptblock so we don't repeat the default return logic 3 times
+    $ReturnDefault = { if ($DefaultType -eq "array") { return @() } else { return @{} } }
+
     if (-not (Test-Path $Path)) {
-        return if ($DefaultType -eq "array") { @() } else { @{} }
+        & $ReturnDefault
     }
+
     try {
-        $raw = Get-Content $Path -Raw -Encoding UTF8
-        if ($DefaultType -eq "array") { return @(ConvertFrom-Json $raw) }
-        else {
+        # Added -ErrorAction Stop to guarantee the catch block catches file read errors
+        $raw = Get-Content $Path -Raw -Encoding UTF8 -ErrorAction Stop
+        
+        # Guard against completely empty files which can break ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            & $ReturnDefault
+        }
+
+        if ($DefaultType -eq "array") { 
+            return @(ConvertFrom-Json $raw) 
+        } else {
+            # Note: If using PS Core (v6+), change the next 4 lines to: return (ConvertFrom-Json $raw -AsHashtable)
             $obj  = ConvertFrom-Json $raw
             $hash = @{}
             $obj.PSObject.Properties | ForEach-Object { $hash[$_.Name] = $_.Value }
             return $hash
         }
-    } catch { return if ($DefaultType -eq "array") { @() } else { @{} } }
+    } catch { 
+        & $ReturnDefault 
+    }
 }
 
 function _SC-SaveJson {
@@ -2688,7 +2714,7 @@ function ai-history {
             Write-Host "  [!] PowerShell history file not found." -ForegroundColor Yellow
             Write-Host "      PSReadLine may not be installed. Try: Install-Module PSReadLine" -ForegroundColor DarkGray; return
         }
-        $hist     = Get-Content $psrlPath -Tail 500 -Encoding UTF8
+        $hist = Get-Content $psrlPath -Tail 500 -Encoding UTF8 -EA SilentlyContinue
         $histText = $hist -join "`n"
         $result   = _SC-Ask -Prompt "From this PowerShell history, find up to 5 commands most relevant to: '$Query'`nReturn ONLY the matching command lines, one per line. No explanation." `
                              -System "Return only matching command lines. Nothing else." -Silent
@@ -3452,7 +3478,10 @@ $artBody
     $slogFile = Join-Path $env:TEMP "sc_session.json"
     $last     = "First session"
     try {
-        if (Test-Path $slogFile) { $last = (Get-Content $slogFile -Raw | ConvertFrom-Json).last }
+        if (Test-Path $slogFile) { 
+                                                      $logData = Get-Content $slogFile -Raw -EA SilentlyContinue
+                                                      if ($logData) { $last = ($logData | ConvertFrom-Json).last }
+                    }
         @{ last = (Get-Date -Format "yyyy-MM-dd HH:mm") } | ConvertTo-Json -Compress |
             Set-Content $slogFile -Encoding UTF8
     } catch {}
