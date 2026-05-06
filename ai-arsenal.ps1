@@ -44,7 +44,7 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.1.2"
+$Global:SC_VERSION     = "4.1.3"
 $Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
@@ -2471,7 +2471,7 @@ function ai-snippet {
     )
     _SC-Track "ai-snippet"
     $f    = Join-Path $env:TEMP "sc_snippets.json"
-    $data = _SC-LoadJson $f "hash"
+    $data = _SC-LoadJson $f "hashtable"
 
     switch ($Action.ToLower()) {
         { $_ -in "save","add" } {
@@ -2800,7 +2800,7 @@ function ai-stats {
     $cfg = _SC-LoadConfig
     Write-Host ""; Write-Host "  [ USAGE DASHBOARD · $(Get-Date -Format 'dd MMM yyyy · HH:mm') ]" -ForegroundColor Cyan; Write-Host ""
 
-    $usageData = _SC-LoadJson (Join-Path $env:TEMP "sc_usage.json") "hash"
+    $usageData = _SC-LoadJson (Join-Path $env:TEMP "sc_usage.json") "hashtable"
     if ($usageData.Count -gt 0) {
         $total = ($usageData.Values | Measure-Object -Sum).Sum
         Write-Host "  ── Top Commands ─────────────────────────────────────" -ForegroundColor DarkCyan
@@ -2831,7 +2831,7 @@ function ai-stats {
 
     $todos     = _SC-LoadJson (Join-Path $env:TEMP "sc_todos.json") "array"
     $notes     = _SC-LoadJson (Join-Path $env:TEMP "sc_notes.json") "array"
-    $snippets  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hash"
+    $snippets  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hashtable"
     $pending   = @($todos | Where-Object { -not $_.done }).Count
     Write-Host ""; Write-Host "  ── Workspace ─────────────────────────────────────────" -ForegroundColor DarkCyan
     Write-Host "  Todos    : $pending pending" -ForegroundColor $(if($pending -gt 0){"Yellow"}else{"DarkGray"})
@@ -3157,7 +3157,7 @@ function ai-self-test {
     $jsonOk   = $false
     try {
         ai-snippet save $testKey "ok-$testKey" 2>&1 | Out-Null
-        $snips  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hash"
+        $snips  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hashtable"
         $jsonOk = $snips.ContainsKey($testKey) -and $snips[$testKey] -like "ok-*"
         ai-snippet delete $testKey 2>&1 | Out-Null
     } catch {}
