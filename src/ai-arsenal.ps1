@@ -44,11 +44,22 @@
 Set-StrictMode -Off   # keep permissive — profile runs in user context
 
 # ── GLOBAL CONSTANTS (never changed at runtime) ───────────────────────────
-$Global:SC_VERSION     = "4.1.4"
-$Global:SC_CONFIG_FILE = Join-Path $env:TEMP "sc_config.json"
+$Global:SC_VERSION     = "4.2.0"
 $Global:SC_MAX_CHARS   = 12000
 $Global:SC_MODEL       = "mistral:latest"   # overwritten by _SC-LoadConfig
+$Global:SC_DATA_DIR    = Join-Path $env:APPDATA "AI-Arsenal"
+if (-not (Test-Path $Global:SC_DATA_DIR)) { New-Item -ItemType Directory -Path $Global:SC_DATA_DIR -Force | Out-Null }
+$Global:SC_CONFIG_FILE = Join-Path $Global:SC_DATA_DIR "sc_config.json"
 
+# ── Migrate config from old TEMP location ────────────────────────────────
+$_oldConfig = Join-Path $env:TEMP "sc_config.json"
+if (-not (Test-Path $Global:SC_CONFIG_FILE) -and (Test-Path $_oldConfig)) {
+    try {
+        Copy-Item $_oldConfig $Global:SC_CONFIG_FILE -Force
+        Write-Host "  [~] Migrated your settings from old version to AppData." -ForegroundColor DarkGray
+    } catch {}
+}
+# ─────────────────────────────────────────────────────────────────────────
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIG — LOAD / SAVE
 # ════════════════════════════════════════════════════════════════════════════
@@ -64,7 +75,7 @@ function _SC-LoadConfig {
         MaxChars    = 12000
         City        = ""
         AnimStyle   = "instant"
-        Role        = "SDET"
+        Role        = ""
         SetupDone   = $false
         CloudModel  = ""
     }
@@ -215,15 +226,15 @@ function ai-setup {
     Write-Host ""
     Write-Host "  [3/5] Choose your AI backend:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "        [1] Local  — Ollama  (free · private · offline-capable)" -ForegroundColor Gray
-    Write-Host "             Needs: ollama.com installed + at least one model pulled" -ForegroundColor DarkGray
-    Write-Host "             RAM:   mistral needs ~4 GB  |  gemma2:2b needs ~2 GB" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "        [2] Claude — Anthropic API  (highest quality · ~`$0.01/query)" -ForegroundColor Gray
-    Write-Host "             Key at: https://console.anthropic.com" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "        [3] OpenAI — GPT-4o  (popular · ~`$0.01/query)" -ForegroundColor Gray
-    Write-Host "             Key at: https://platform.openai.com" -ForegroundColor DarkGray
+    Write-Host "        [1] Local     — Ollama         (free · private · offline)" -ForegroundColor Cyan
+    Write-Host "        [2] Claude    — Anthropic API  (~`$0.003/query · best quality)" -ForegroundColor Gray
+    Write-Host "        [3] OpenAI    — GPT-4o          (~`$0.01/query)" -ForegroundColor Yellow
+    Write-Host "        [4] Gemini    — Google AI Studio (FREE · no card needed)" -ForegroundColor Yellow
+    Write-Host "             Key: https://aistudio.google.com/app/apikey" -ForegroundColor DarkGray
+    Write-Host "        [5] Groq      — Ultra-fast       (FREE · Llama/Mixtral)" -ForegroundColor Green
+    Write-Host "             Key: https://console.groq.com  (starts with gsk_)" -ForegroundColor DarkGray
+    Write-Host "        [6] OpenRouter — Multi-model     (FREE models available)" -ForegroundColor Green
+    Write-Host "             Key: https://openrouter.ai/keys  (starts with sk-or-)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "        Current: $($cfg.AIMode)$(if($cfg.APIProvider){" · $($cfg.APIProvider)"})" -ForegroundColor DarkCyan
     Write-Host "        Press Enter to keep current." -ForegroundColor DarkGray
@@ -298,9 +309,27 @@ function ai-setup {
                 Write-Host "      Without a key, cloud AI commands will not work." -ForegroundColor DarkGray
             }
         }
+        "4" {
+            $cfg.AIMode = "cloud"; $cfg.APIProvider = "gemini"
+            Write-Host "  Enter Gemini key (AIza...): " -NoNewline -ForegroundColor Yellow
+            $key = (Read-Host).Trim()
+            if ($key) { $cfg.APIKey = $key; Write-Host "  [✓] Gemini key saved." -ForegroundColor Green }
+        }
+        "5" {
+            $cfg.AIMode = "cloud"; $cfg.APIProvider = "groq"
+            Write-Host "  Enter Groq key (gsk_...): " -NoNewline -ForegroundColor Yellow
+            $key = (Read-Host).Trim()
+            if ($key) { $cfg.APIKey = $key; Write-Host "  [✓] Groq key saved." -ForegroundColor Green }
+        }
+        "6" {
+            $cfg.AIMode = "cloud"; $cfg.APIProvider = "openrouter"
+            Write-Host "  Enter OpenRouter key (sk-or-...): " -NoNewline -ForegroundColor Yellow
+            $key = (Read-Host).Trim()
+            if ($key) { $cfg.APIKey = $key; Write-Host "  [✓] OpenRouter key saved." -ForegroundColor Green }
+        }
         "" { Write-Host "  [~] Backend unchanged: $($cfg.AIMode)" -ForegroundColor DarkGray }
         default {
-            Write-Host "  [!] '$choice' is not a valid option (1, 2, or 3)." -ForegroundColor Yellow
+            Write-Host "  [!] '$choice' is not a valid option (1–6)." -ForegroundColor Yellow
             Write-Host "      Backend unchanged: $($cfg.AIMode)" -ForegroundColor DarkGray
         }
     }
@@ -351,9 +380,7 @@ function ai-setup {
     if ($cfg.AIMode -eq "local") {
         Write-Host "    ai-run        ← start Ollama and load your model" -ForegroundColor Cyan
     }
-    Write-Host ""
 }
-
 # Auto-run setup on very first use
 $_firstRunCfg = _SC-LoadConfig
 if (-not $_firstRunCfg.SetupDone) {
@@ -465,7 +492,7 @@ function _SC-Track {
     param([string]$Cmd)
     # Non-blocking — any failure here must never interrupt the user
     try {
-        $f    = Join-Path $env:TEMP "sc_usage.json"
+        $f    = Join-Path $Global:SC_DATA_DIR "sc_usage.json"
         $data = @{}
         if (Test-Path $f) {
             $raw = Get-Content $f -Raw -Encoding UTF8 -EA SilentlyContinue
@@ -485,8 +512,12 @@ function _SC-Track {
 
 function _SC-SystemPrompt {
     $cfg  = _SC-LoadConfig
-    $role = if (-not [string]::IsNullOrWhiteSpace($cfg.Role)) { $cfg.Role } else { "software developer" }
+    $role = $cfg.Role
+    if ([string]::IsNullOrWhiteSpace($role)) {
+         return "You are a helpful, concise expert assistant. Be accurate and direct. Never wrap code in markdown fences unless explicitly asked."
+    } else {
     return "You are a senior expert assistant for a $role. Be concise, technical, and accurate. Never wrap code in markdown fences unless explicitly asked."
+           }
 }
 
 function _SC-CallCloud {
@@ -519,7 +550,7 @@ function _SC-CallCloud {
     # ── ANTHROPIC ─────────────────────────────────────────────────────────
     if ($cfg.APIProvider -eq "anthropic") {
         $body = @{
-            model      = if ($cfg.CloudModel) { $cfg.CloudModel } else { "claude-3-5-sonnet-20241022" }
+            model      = if ($cfg.CloudModel) { $cfg.CloudModel } else { "claude-sonnet-4-6" }
             max_tokens = $MaxTok
             system     = $System
             messages   = @(@{ role = "user"; content = $Prompt })
@@ -567,7 +598,7 @@ function _SC-CallCloud {
     # ── OPENAI ────────────────────────────────────────────────────────────
     if ($cfg.APIProvider -eq "openai") {
         $body = @{
-            model    = "gpt-4o"
+            model    = if ($cfg.CloudModel) { $cfg.CloudModel } else { "gpt-4o" }
             messages = @(
                 @{ role = "system"; content = $System }
                 @{ role = "user";   content = $Prompt }
@@ -611,7 +642,92 @@ function _SC-CallCloud {
         }
         return ""
     }
+    # ── GEMINI ───────────────────────────────────────────────────────────
+    if ($cfg.APIProvider -eq "gemini") {
+        $body = @{
+            contents         = @(@{ role = "user"; parts = @(@{ text = "$System`n`n$Prompt" }) })
+            generationConfig = @{ maxOutputTokens = $MaxTok }
+        } | ConvertTo-Json -Depth 10 -Compress
+        $delay = 2
+        $geminiModel = if ($cfg.CloudModel) { $cfg.CloudModel } else { "gemini-1.5-flash" }
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $r = Invoke-RestMethod `
+                    -Uri "https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=$($cfg.APIKey)" `
+                    -Method POST -ContentType "application/json" -Body $body -TimeoutSec 90 -EA Stop
+                return $r.candidates[0].content.parts[0].text
+            } catch {
+                $e = $_.Exception.Message
+                $isFatal = $e -match "401|403|400|invalid"
+                if ($attempt -lt $maxRetries -and -not $isFatal) {
+                    Write-Host "  [~] Gemini attempt $attempt/$maxRetries failed. Retrying in ${delay}s..." -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $delay; $delay *= 2
+                } else {
+                    Write-Host "  [✗] Gemini error: $e" -ForegroundColor Red
+                    Write-Host "      Check key at: https://aistudio.google.com/app/apikey" -ForegroundColor DarkGray
+                    return ""
+                }
+            }
+        }
+    }
 
+    if ($cfg.APIProvider -eq "groq") {
+        $body = @{
+            model    = if ($cfg.CloudModel) { $cfg.CloudModel } else { "llama3-8b-8192" }
+            messages = @(@{ role = "system"; content = $System }, @{ role = "user"; content = $Prompt })
+        } | ConvertTo-Json -Depth 10 -Compress
+        $delay = 2
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $r = Invoke-RestMethod -Uri "https://api.groq.com/openai/v1/chat/completions" -Method POST `
+                    -Headers @{ "Authorization" = "Bearer $($cfg.APIKey)"; "Content-Type" = "application/json" } `
+                    -Body $body -TimeoutSec 90 -EA Stop
+                return $r.choices[0].message.content
+            } catch {
+                $e = $_.Exception.Message
+                $isFatal = $e -match "401|403|400|invalid"
+                if ($attempt -lt $maxRetries -and -not $isFatal) {
+                    Write-Host "  [~] Groq attempt $attempt/$maxRetries failed. Retrying in ${delay}s..." -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $delay; $delay *= 2
+                } else {
+                    Write-Host "  [✗] Groq error: $e" -ForegroundColor Red
+                    Write-Host "      Check key at: https://console.groq.com" -ForegroundColor DarkGray
+                    return ""
+                }
+            }
+        }
+    }
+
+    if ($cfg.APIProvider -eq "openrouter") {
+        $body = @{
+            model    = if ($cfg.CloudModel) { $cfg.CloudModel } else { "meta-llama/llama-3-8b-instruct:free" }
+            messages = @(@{ role = "system"; content = $System }, @{ role = "user"; content = $Prompt })
+        } | ConvertTo-Json -Depth 10 -Compress
+        $delay = 2
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $r = Invoke-RestMethod -Uri "https://openrouter.ai/api/v1/chat/completions" -Method POST `
+                    -Headers @{
+                        "Authorization" = "Bearer $($cfg.APIKey)"
+                        "Content-Type"  = "application/json"
+                        "HTTP-Referer"  = "https://github.com/SomanjanPramanik/AI-Arsenal"
+                        "X-Title"       = "AI Arsenal"
+                    } -Body $body -TimeoutSec 90 -EA Stop
+                return $r.choices[0].message.content
+            } catch {
+                $e = $_.Exception.Message
+                $isFatal = $e -match "401|403|400|invalid"
+                if ($attempt -lt $maxRetries -and -not $isFatal) {
+                    Write-Host "  [~] OpenRouter attempt $attempt/$maxRetries failed. Retrying in ${delay}s..." -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $delay; $delay *= 2
+                } else {
+                    Write-Host "  [✗] OpenRouter error: $e" -ForegroundColor Red
+                    Write-Host "      Check key at: https://openrouter.ai/keys" -ForegroundColor DarkGray
+                    return ""
+                }
+            }
+        }
+    }
     Write-Host "  [✗] No cloud provider is configured." -ForegroundColor Red
     Write-Host "      Fix: ai-setup  →  choose option 2 (Claude) or 3 (OpenAI)." -ForegroundColor Cyan
     return ""
@@ -769,7 +885,10 @@ function _SC-Ask {
 function _SC-Trim {
     param([string]$s, [int]$max = $Global:SC_MAX_CHARS)
     if ($s.Length -gt $max) {
-        return $s.Substring(0, $max) + "`n...[content truncated to $max chars]"
+        $cut = $s.LastIndexOf("`n", $max)
+        if ($cut -lt 0) { $cut = $max }
+        Write-Host "  ⚠  File truncated to ~$([math]::Round($cut/1000))k chars (model limit)" -ForegroundColor Yellow
+        return $s.Substring(0, $cut) + "`n...[truncated]"
     }
     return $s
 }
@@ -805,7 +924,7 @@ try:
 except Exception as e:
     print(f"PDF_ERROR:{e}")
 "@
-            $tmp = Join-Path $env:TEMP "sc_read_pdf.py"
+            $tmp = Join-Path $Global:SC_DATA_DIR "sc_read_pdf.py"
             $pyScript | Set-Content $tmp -Encoding UTF8
             $out = (& python $tmp $Path 2>&1) -join "`n"
             if ($out -match "ModuleNotFoundError|No module named 'fitz'") {
@@ -835,7 +954,7 @@ try:
 except Exception as e:
     print(f"DOCX_ERROR:{e}")
 "@
-            $tmp = Join-Path $env:TEMP "sc_read_docx.py"
+            $tmp = Join-Path $Global:SC_DATA_DIR "sc_read_docx.py"
             $pyScript | Set-Content $tmp -Encoding UTF8
             $out = (& python $tmp $Path 2>&1) -join "`n"
             if ($out -match "ModuleNotFoundError|No module named 'docx'") {
@@ -968,7 +1087,7 @@ function ai-chat {
         if ($lower -in @("exit","quit","bye","q")) {
             # Auto-save if session has content
             if ($turns.Count -gt 0) {
-                $f = Join-Path $env:TEMP "sc_chat_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+                $f = Join-Path $Global:SC_DATA_DIR "sc_chat_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
                 ($turns | ForEach-Object { "$($_.role): $($_.content)" }) -join "`n`n" |
                     Set-Content $f -Encoding UTF8
                 Write-Host "  [✓] Session auto-saved → $f" -ForegroundColor DarkGray
@@ -983,7 +1102,7 @@ function ai-chat {
 
         if ($lower -eq "save") {
             if ($turns.Count -eq 0) { Write-Host "  [~] Nothing to save yet." -ForegroundColor DarkGray; continue }
-            $f = Join-Path $env:TEMP "sc_chat_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+            $f = Join-Path $Global:SC_DATA_DIR "sc_chat_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
             ($turns | ForEach-Object { "$($_.role): $($_.content)" }) -join "`n`n" |
                 Set-Content $f -Encoding UTF8
             Write-Host "  [✓] Saved → $f" -ForegroundColor Green; continue
@@ -1219,51 +1338,160 @@ function ai-search {
     .SYNOPSIS
     Search for files by name, or search inside files for text.
     .EXAMPLE
-    ai-search "LoginPage"                      ← find files named LoginPage*
-    ai-search "driver.findElement" -Content    ← find files containing that text
-    ai-search "config" "C:\Projects"           ← search in a specific folder
+    ai-search "LoginPage"                        ← search everywhere on this PC
+    ai-search "driver.findElement" -Content      ← search inside file contents
+    ai-search "config" -Path "C:\Projects"       ← search in a specific folder
     #>
     param(
         [Parameter(Mandatory)][string]$Query,
-        [string]$Path = $PWD.Path,
+        [string]$Path,
         [switch]$Content
     )
     _SC-Track "ai-search"
-    if (-not (Test-Path $Path -PathType Container)) {
-        Write-Host "  [✗] Folder not found: $Path" -ForegroundColor Red
-        Write-Host "      Current directory: $(Get-Location)" -ForegroundColor DarkGray
-        return
-    }
-    Write-Host ""; Write-Host "  [ ai-search ] '$Query' in $Path" -ForegroundColor DarkCyan
-    $nameResults = Get-ChildItem -Path $Path -Recurse -EA SilentlyContinue |
-                   Where-Object { $_.Name -match [regex]::Escape($Query) } | Select-Object -First 20
-    if ($nameResults.Count -gt 0) {
-        Write-Host "  ── Files matching name ─────────────────────────────" -ForegroundColor Cyan
-        foreach ($r in $nameResults) {
-            $icon = if ($r.PSIsContainer) {"📁"} else {"📄"}
-            Write-Host "  $icon $($r.FullName)" -ForegroundColor Green
+
+    # ── RISK CLASSIFIER ───────────────────────────────────────────────────
+    function _SC-FileRisk {
+        param([string]$FullPath)
+        $p = $FullPath.ToLower()
+        if ($p -match 'windows\\system32|windows\\syswow64|windows\\winsxs|windows\\boot|
+                        windows\\servicing|appdata\\local\\temp|appdata\\roaming\\microsoft\\windows|
+                        programdata\\microsoft|ntuser\.dat|system\.ini|win\.ini') {
+            return @{ Level = "SYSTEM"; Icon = "🔴"; Color = "Red"
+                      Warning = "SYSTEM FILE — Modifying this can break Windows. Do not touch." }
         }
-        Write-Host ""
+        if ($p -match 'program files|appdata\\local\\programs|appdata\\roaming|
+                        programdata|windows\\|system volume information|
+                        \.dll$|\.sys$|\.exe$|\.reg$|\.msi$') {
+            return @{ Level = "PROTECTED"; Icon = "🟡"; Color = "Yellow"
+                      Warning = "PROTECTED — App/system config. Developers: edit carefully. Regular users: leave it." }
+        }
+        return @{ Level = "SAFE"; Icon = "🟢"; Color = "Green"; Warning = "" }
+    }
+
+    # ── BREADCRUMB BUILDER ────────────────────────────────────────────────
+    function _SC-Breadcrumb {
+        param([string]$FullPath, [string]$FileIcon)
+        $parts = $FullPath -split '\\'
+        $crumb = "     💻"
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ([string]::IsNullOrWhiteSpace($parts[$i])) { continue }
+            if ($i -eq $parts.Count - 1) { $crumb += " > $FileIcon $($parts[$i])" }
+            else                         { $crumb += " > 📂 $($parts[$i])" }
+        }
+        return $crumb
+    }
+
+    # ── RESULT PRINTER ────────────────────────────────────────────────────
+    function _SC-PrintResult {
+        param($Item)
+        $icon       = if ($Item.PSIsContainer) {"📁"} else {"📄"}
+        $risk       = _SC-FileRisk $Item.FullName
+        $crumb      = _SC-Breadcrumb $Item.FullName $icon
+        $crumbColor = switch ($risk.Level) { "SYSTEM" {"Red"} "PROTECTED" {"Yellow"} default {"DarkCyan"} }
+
+        Write-Host "  $($risk.Icon) $icon $($Item.FullName)" -ForegroundColor $risk.Color
+        Write-Host $crumb -ForegroundColor $crumbColor
+
+        if (-not $Item.PSIsContainer) {
+            $sizeKB = [math]::Round($Item.Length / 1KB, 1)
+            $age    = (Get-Date) - $Item.LastWriteTime
+            $when   = if ($age.Days -eq 0)        { "today" } `
+                 elseif ($age.Days -eq 1)          { "yesterday" } `
+                 elseif ($age.Days -lt 7)          { "$($age.Days)d ago" } `
+                 elseif ($age.Days -lt 30)         { "$([math]::Round($age.Days/7))w ago" } `
+                 else                              { "$([math]::Round($age.Days/30))mo ago" }
+            Write-Host "     📊 $sizeKB KB · modified $when" -ForegroundColor DarkGray
+        }
+    }
+
+    # ── BUILD SEARCH ROOTS ────────────────────────────────────────────────
+    if ($Path) {
+        if (-not (Test-Path $Path -PathType Container)) {
+            Write-Host "  [✗] Folder not found: $Path" -ForegroundColor Red
+            Write-Host "      Current directory: $(Get-Location)" -ForegroundColor DarkGray
+            return
+        }
+        $searchRoots = @($Path)
     } else {
-        Write-Host "  [~] No files found with '$Query' in the name." -ForegroundColor Yellow
-        if (-not $Content) {
-            Write-Host "      Tip: try  ai-search `"$Query`" -Content  to search inside files too." -ForegroundColor DarkGray
-        }
+        $searchRoots = @(
+            "$env:USERPROFILE\Documents",
+            "$env:USERPROFILE\Desktop",
+            "$env:USERPROFILE\Downloads",
+            "$env:USERPROFILE\Pictures",
+            "$env:USERPROFILE\Videos",
+            "$env:USERPROFILE\Music",
+            "C:\Local AI"
+        )
+        $extraDrives = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -notmatch '^C:\\$' }).Root
+        foreach ($d in $extraDrives) { if (Test-Path $d) { $searchRoots += $d } }
+        $searchRoots = $searchRoots | Where-Object { Test-Path $_ } | Select-Object -Unique
     }
+
+    Write-Host ""
+    Write-Host "  [ ai-search ] '$Query'" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    # ── FILE NAME SEARCH ──────────────────────────────────────────────────
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $nameResults = @(foreach ($root in $searchRoots) {
+        Get-ChildItem -Path $root -Recurse -EA SilentlyContinue |
+            Where-Object { $_.Name -match [regex]::Escape($Query) }
+    })
+
+    $sw.Stop()
+
+    if ($nameResults.Count -gt 0) {
+        Write-Host "  ── Files matching name ($($nameResults.Count)) ──────────────────" -ForegroundColor Cyan
+        Write-Host ""
+
+        $sorted = $nameResults | Sort-Object {
+            switch ((_SC-FileRisk $_.FullName).Level) { "SAFE" {0} "PROTECTED" {1} "SYSTEM" {2} }
+        }
+        foreach ($item in $sorted) { _SC-PrintResult $item }
+
+        if ($sw.Elapsed.TotalSeconds -gt 2.5 -and
+            $nameResults.Count -gt 15 -and
+            -not $Global:SC_PathTipShown) {
+            Write-Host "  💡 Too many results? Try: ai-search `"$Query`" -Path `"C:\YourFolder`" to narrow it down." -ForegroundColor DarkGray
+            $Global:SC_PathTipShown = $true
+        }
+    } else {
+        Write-Host "  [~] No files found matching '$Query' on this PC 💻" -ForegroundColor Yellow
+    }
+
+    # ── CONTENT SEARCH ────────────────────────────────────────────────────
     if ($Content) {
-        Write-Host "  ── Files containing that text ──────────────────────" -ForegroundColor Cyan
-        $allFiles = Get-ChildItem $Path -Recurse -Include @("*.txt","*.java","*.py","*.md","*.xml",
-                    "*.json","*.ps1","*.cs","*.js","*.html","*.ts","*.yaml","*.yml") -EA SilentlyContinue
-        if ($allFiles.Count -eq 0) {
-            Write-Host "  [~] No searchable files found in this folder." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  ── Files containing '$Query' ────────────────────────" -ForegroundColor Cyan
+        Write-Host ""
+
+        $allFiles = @(foreach ($root in $searchRoots) {
+            Get-ChildItem $root -Recurse -EA SilentlyContinue -Include @(
+                "*.txt","*.java","*.py","*.md","*.xml","*.json",
+                "*.ps1","*.cs","*.js","*.html","*.ts","*.yaml","*.yml"
+            )
+        })
+
+        if (-not $allFiles) {
+            Write-Host "  [~] No searchable files found." -ForegroundColor Yellow
         } else {
-            $contentResults = Select-String -Path ($allFiles | Select-Object -ExpandProperty FullName) `
-                              -Pattern ([regex]::Escape($Query)) -EA SilentlyContinue | Select-Object -First 15
-            if ($contentResults.Count -gt 0) {
+            $contentResults = $allFiles |
+                Select-Object -ExpandProperty FullName |
+                Select-String -Pattern ([regex]::Escape($Query)) -EA SilentlyContinue |
+                Select-Object -First 50
+
+            if ($contentResults) {
                 foreach ($r in $contentResults) {
-                    Write-Host "  📝 $($r.Path)" -NoNewline -ForegroundColor Green
-                    Write-Host " (line $($r.LineNumber)): " -NoNewline -ForegroundColor DarkGray
-                    Write-Host $r.Line.Trim() -ForegroundColor Gray
+                    $risk  = _SC-FileRisk $r.Path
+                    $crumb = _SC-Breadcrumb $r.Path "📝"
+                    Write-Host "  $($risk.Icon) 📝 $($r.Path)" -ForegroundColor $risk.Color
+                    Write-Host $crumb -ForegroundColor DarkCyan
+                    Write-Host "     Line $($r.LineNumber): $($r.Line.Trim())" -ForegroundColor Gray
+                    if ($risk.Warning -ne "") {
+                        Write-Host "     ⚠  $($risk.Warning)" -ForegroundColor $risk.Color
+                    }
+                    Write-Host ""
                 }
             } else {
                 Write-Host "  [~] No content matches for '$Query'." -ForegroundColor Yellow
@@ -1271,8 +1499,9 @@ function ai-search {
             }
         }
     }
+
     Write-Host ""
-}
+ }
 
 function ai-fix {
     <#
@@ -1385,7 +1614,7 @@ function ai-img {
             Write-Host "  [✗] No Anthropic API key. Run: ai-setup" -ForegroundColor Red; return
         }
         $body = @{
-            model      = "claude-3-5-sonnet-20241022"
+            model      = if ($cfg.CloudModel) { $cfg.CloudModel } else { "claude-sonnet-4-6" }
             max_tokens = 1024
             messages   = @(@{
                 role    = "user"
@@ -1414,7 +1643,7 @@ function ai-img {
             Write-Host "  [✗] No OpenAI API key. Run: ai-setup" -ForegroundColor Red; return
         }
         $body = @{
-            model    = "gpt-4o"
+            model    = if ($cfg.CloudModel) { $cfg.CloudModel } else { "gpt-4o" }
             messages = @(@{
                 role    = "user"
                 content = @(
@@ -1488,7 +1717,7 @@ function ai-ocr {
     $target = $Path
     if ([System.IO.Path]::GetExtension($Path).ToLower() -eq ".pdf") {
         Write-Host "  [~] Converting PDF page 1 to image..." -ForegroundColor DarkGray
-        $target = Join-Path $env:TEMP "sc_ocr_temp.png"
+        $target = Join-Path $Global:SC_DATA_DIR "sc_ocr_temp.png"
         & python -c "import fitz,sys; doc=fitz.open(sys.argv[1]); pix=doc.load_page(0).get_pixmap(dpi=150); pix.save(sys.argv[2])" $Path $target 2>&1 | Out-Null
         if (-not (Test-Path $target)) {
             Write-Host "  [✗] Could not convert PDF. Fix: pip install PyMuPDF" -ForegroundColor Red; return
@@ -1507,7 +1736,7 @@ except ModuleNotFoundError:
 except Exception as e:
     print(f"OCR_ERROR:{e}")
 "@
-    $tmp     = Join-Path $env:TEMP "sc_ocr.py"
+    $tmp     = Join-Path $Global:SC_DATA_DIR "sc_ocr.py"
     $pyScript | Set-Content $tmp -Encoding UTF8
     $ocrText = (python $tmp $target 2>&1 | Where-Object { $_ -notmatch "^(UserWarning|WARNING|INFO|CUDA)" }) -join "`n"
 
@@ -1709,7 +1938,7 @@ function ai-qa {
     param([Parameter(Mandatory)][string]$Description)
     _SC-Track "ai-qa"
     $cfg  = _SC-LoadConfig
-    $role = if (-not [string]::IsNullOrWhiteSpace($cfg.Role)) { $cfg.Role } else { "Java SDET" }
+    $role = if (-not [string]::IsNullOrWhiteSpace($cfg.Role)) { $cfg.Role } else { "software developer" }
     Write-Host ""; Write-Host "  [ ai-qa ] Generating test automation for:" -ForegroundColor DarkCyan
     Write-Host "  $Description" -ForegroundColor White; Write-Host ""
     _SC-Ask -Prompt "Generate complete production-ready test automation for: `"$Description`"`n`nInclude: 1. Gherkin .feature file  2. Step Definitions class  3. Page Object Model class  4. TestNG runner config.`nUse: explicit waits, POM pattern, proper package structure.`nTech stack: $role" `
@@ -2112,7 +2341,7 @@ function ai-flashcard {
     $cfg = _SC-LoadConfig
     if ($cfg.AIMode -eq "local" -and -not (_SC-OllamaCheck)) { return }
 
-    $statsFile = Join-Path $env:TEMP "sc_flashcards.json"
+    $statsFile = Join-Path $Global:SC_DATA_DIR "sc_flashcards.json"
     $stats = @{}
     if (Test-Path $statsFile) {
         try {
@@ -2325,7 +2554,7 @@ function ai-note {
     #>
     param([Parameter(Mandatory)][string]$Text)
     _SC-Track "ai-note"
-    $f     = Join-Path $env:TEMP "sc_notes.json"
+    $f     = Join-Path $Global:SC_DATA_DIR "sc_notes.json"
     $notes = _SC-LoadJson $f "array"
     $notes += [PSCustomObject]@{ id=($notes.Count+1); time=(Get-Date -Format "yyyy-MM-dd HH:mm"); text=$Text }
     _SC-SaveJson $f $notes
@@ -2339,7 +2568,7 @@ function ai-notes {
     .EXAMPLE
     ai-notes
     #>
-    $f     = Join-Path $env:TEMP "sc_notes.json"
+    $f     = Join-Path $Global:SC_DATA_DIR "sc_notes.json"
     $notes = _SC-LoadJson $f "array"
     if ($notes.Count -eq 0) {
         Write-Host ""; Write-Host "  [~] No notes yet." -ForegroundColor Yellow
@@ -2363,7 +2592,7 @@ function ai-note-clear {
     #>
     Write-Host "  Delete ALL notes permanently? [Y/N] " -NoNewline -ForegroundColor Yellow
     if ((Read-Host).Trim().ToUpper() -eq "Y") {
-        Remove-Item (Join-Path $env:TEMP "sc_notes.json") -EA SilentlyContinue
+        Remove-Item (Join-Path $Global:SC_DATA_DIR "sc_notes.json") -EA SilentlyContinue
         Write-Host "  [✓] All notes cleared." -ForegroundColor Green
     } else {
         Write-Host "  [Skipped] Notes are untouched." -ForegroundColor DarkGray
@@ -2380,7 +2609,7 @@ function ai-todo {
     #>
     param([Parameter(Mandatory)][string]$Task)
     _SC-Track "ai-todo"
-    $f     = Join-Path $env:TEMP "sc_todos.json"
+    $f     = Join-Path $Global:SC_DATA_DIR "sc_todos.json"
     $todos = _SC-LoadJson $f "array"
     $todos += [PSCustomObject]@{ id=($todos.Count+1); done=$false; time=(Get-Date -Format "yyyy-MM-dd HH:mm"); task=$Task }
     _SC-SaveJson $f $todos
@@ -2395,7 +2624,7 @@ function ai-todos {
     .EXAMPLE
     ai-todos
     #>
-    $f     = Join-Path $env:TEMP "sc_todos.json"
+    $f     = Join-Path $Global:SC_DATA_DIR "sc_todos.json"
     $todos = _SC-LoadJson $f "array"
     if ($todos.Count -eq 0) {
         Write-Host ""; Write-Host "  [~] No todos yet." -ForegroundColor Yellow
@@ -2425,7 +2654,7 @@ function ai-done {
     ai-done 5
     #>
     param([Parameter(Mandatory)][int]$Id)
-    $f     = Join-Path $env:TEMP "sc_todos.json"
+    $f     = Join-Path $Global:SC_DATA_DIR "sc_todos.json"
     $todos = _SC-LoadJson $f "array"
     if ($todos.Count -eq 0) {
         Write-Host "  [~] No todos found. Add one: ai-todo `"task`"" -ForegroundColor Yellow; return
@@ -2470,7 +2699,7 @@ function ai-snippet {
         [Parameter(Position=2)][string]$Value = ""
     )
     _SC-Track "ai-snippet"
-    $f    = Join-Path $env:TEMP "sc_snippets.json"
+    $f    = Join-Path $Global:SC_DATA_DIR "sc_snippets.json"
     $data = _SC-LoadJson $f "hashtable"
 
     switch ($Action.ToLower()) {
@@ -2637,7 +2866,7 @@ function ai-timer {
     _SC-Track "ai-timer"
     $totalSec = $Minutes * 60
     $tag      = if ($Label -ne "") { $Label } elseif ($Minutes -eq 25) { "Pomodoro" } else { "${Minutes}-min session" }
-    $logFile  = Join-Path $env:TEMP "sc_timer_log.json"
+    $logFile  = Join-Path $Global:SC_DATA_DIR "sc_timer_log.json"
     $start    = Get-Date
 
     Write-Host ""; Write-Host "  [ TIMER · $tag · ${Minutes} min ]" -ForegroundColor Cyan
@@ -2675,7 +2904,7 @@ function ai-timer-log {
     .EXAMPLE
     ai-timer-log
     #>
-    $f    = Join-Path $env:TEMP "sc_timer_log.json"
+    $f    = Join-Path $Global:SC_DATA_DIR "sc_timer_log.json"
     $logs = _SC-LoadJson $f "array"
     if ($logs.Count -eq 0) {
         Write-Host ""; Write-Host "  [~] No focus sessions logged yet." -ForegroundColor Yellow
@@ -2771,7 +3000,7 @@ function ai-standup {
     $gitDiff  = if ([string]::IsNullOrWhiteSpace($gitAuthor)) { "" } else {
         _SC-Trim ((git diff --stat HEAD~1 2>$null) -join "`n") 3000
     }
-    $todos    = _SC-LoadJson (Join-Path $env:TEMP "sc_todos.json") "array"
+    $todos    = _SC-LoadJson (Join-Path $Global:SC_DATA_DIR "sc_todos.json") "array"
     $pending  = @($todos | Where-Object { -not $_.done })
     $todosRaw = if ($pending.Count -gt 0) { ($pending | ForEach-Object { "- $($_.task)" }) -join "`n" } else { "(none)" }
 
@@ -2793,63 +3022,159 @@ function ai-stats {
     <#
     .SYNOPSIS
     View your usage dashboard — top commands, focus time, workspace summary, system info.
-    .EXAMPLE
-    ai-stats
     #>
     _SC-Track "ai-stats"
     $cfg = _SC-LoadConfig
-    Write-Host ""; Write-Host "  [ USAGE DASHBOARD · $(Get-Date -Format 'dd MMM yyyy · HH:mm') ]" -ForegroundColor Cyan; Write-Host ""
+    
+    Write-Host "`n  ✦ USAGE DASHBOARD ✦  " -NoNewline -ForegroundColor Cyan
+    Write-Host "$(Get-Date -Format 'dd MMM yyyy · HH:mm')" -ForegroundColor DarkGray
+    Write-Host ""
 
-    $usageData = _SC-LoadJson (Join-Path $env:TEMP "sc_usage.json") "hashtable"
+    # ── TOP COMMANDS ───────────────────────────────────────────────────
+    $usageData = _SC-LoadJson (Join-Path $Global:SC_DATA_DIR "sc_usage.json") "hashtable"
     if ($usageData.Count -gt 0) {
+        Write-Host "  ⚡ TOP COMMANDS " -ForegroundColor Magenta
         $total = ($usageData.Values | Measure-Object -Sum).Sum
-        Write-Host "  ── Top Commands ─────────────────────────────────────" -ForegroundColor DarkCyan
-        $usageData.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 10 | ForEach-Object {
-            $bar = "█" * [math]::Min($_.Value, 25)
+        $usageData.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 4 | ForEach-Object {
+            $barFill = [math]::Min([math]::Round(($_.Value / $total) * 20), 20)
+            $bar = ("█" * $barFill) + ("░" * (20 - $barFill))
             $pct = if ($total -gt 0) { [math]::Round(($_.Value / $total) * 100) } else { 0 }
-            Write-Host ("  {0,-18} {1,-26} {2,3}%  ×{3}" -f $_.Key, $bar, $pct, $_.Value) -ForegroundColor Gray
+            Write-Host ("   {0,-15} [{1}] {2,3}%  ({3})" -f $_.Key, $bar, $pct, $_.Value) -ForegroundColor Gray
         }
-        Write-Host "  Total commands run: $total" -ForegroundColor DarkGray; Write-Host ""
+        Write-Host ""
     }
 
-    Write-Host "  ── Config ───────────────────────────────────────────" -ForegroundColor DarkCyan
-    Write-Host "  User     : $($cfg.UserName)" -ForegroundColor Gray
-    Write-Host "  Role     : $($cfg.Role)" -ForegroundColor Gray
-    Write-Host "  AI Mode  : $($cfg.AIMode)$(if ($cfg.AIMode -eq 'cloud') {" · $($cfg.APIProvider)"})" -ForegroundColor Gray
-    Write-Host "  Model    : $(if ($cfg.AIMode -eq 'local'){$cfg.LocalModel}else{'Cloud API'})" -ForegroundColor Gray
-    Write-Host "  City     : $(if ($cfg.City){ $cfg.City }else{ '(not set — run ai-setup)' })" -ForegroundColor Gray
-
-    $timerLogs = _SC-LoadJson (Join-Path $env:TEMP "sc_timer_log.json") "array"
-    if ($timerLogs.Count -gt 0) {
-        $totalMin = ($timerLogs | Measure-Object -Property minutes -Sum).Sum
-        $todayMin = ($timerLogs | Where-Object { $_.date -like "$(Get-Date -Format 'yyyy-MM-dd')*" } |
-                    Measure-Object -Property minutes -Sum).Sum
-        Write-Host ""; Write-Host "  ── Focus Time ────────────────────────────────────────" -ForegroundColor DarkCyan
-        Write-Host "  Today    : $todayMin min" -ForegroundColor Green
-        Write-Host "  All-time : $totalMin min across $($timerLogs.Count) sessions" -ForegroundColor Gray
-    }
-
-    $todos     = _SC-LoadJson (Join-Path $env:TEMP "sc_todos.json") "array"
-    $notes     = _SC-LoadJson (Join-Path $env:TEMP "sc_notes.json") "array"
-    $snippets  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hashtable"
+    # ── CONFIG & WORKSPACE ─────────────────────────────────────────────
+    Write-Host "  ⚙️  WORKSPACE & CONFIG " -ForegroundColor Blue
+    Write-Host "   User     : " -NoNewline -ForegroundColor DarkGray; Write-Host "$($cfg.UserName)  " -NoNewline -ForegroundColor White
+    Write-Host " Role     : " -NoNewline -ForegroundColor DarkGray; Write-Host "$($cfg.Role)" -ForegroundColor White
+    Write-Host "   AI Mode  : " -NoNewline -ForegroundColor DarkGray; Write-Host "$($cfg.AIMode)  " -NoNewline -ForegroundColor White
+    Write-Host " Model    : " -NoNewline -ForegroundColor DarkGray; Write-Host "$(if ($cfg.AIMode -eq 'local'){$cfg.LocalModel}else{'Cloud API'})" -ForegroundColor White
+    
+    $todos     = _SC-LoadJson (Join-Path $Global:SC_DATA_DIR "sc_todos.json") "array"
+    $notes     = _SC-LoadJson (Join-Path $Global:SC_DATA_DIR "sc_notes.json") "array"
+    $snippets  = _SC-LoadJson (Join-Path $Global:SC_DATA_DIR "sc_snippets.json") "hashtable"
     $pending   = @($todos | Where-Object { -not $_.done }).Count
-    Write-Host ""; Write-Host "  ── Workspace ─────────────────────────────────────────" -ForegroundColor DarkCyan
-    Write-Host "  Todos    : $pending pending" -ForegroundColor $(if($pending -gt 0){"Yellow"}else{"DarkGray"})
-    Write-Host "  Notes    : $($notes.Count) saved" -ForegroundColor DarkGray
-    Write-Host "  Snippets : $($snippets.Count) saved" -ForegroundColor DarkGray
+    Write-Host "   Data     : " -NoNewline -ForegroundColor DarkGray; Write-Host "$pending Todos · $($notes.Count) Notes · $($snippets.Count) Snippets" -ForegroundColor White
+    Write-Host ""
 
+    # ── HARDWARE SPECS ─────────────────────────────────────────────────
+    Write-Host "  💻 SYSTEM HARDWARE " -ForegroundColor Green
+    
+    # CPU
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+    Write-Host "   CPU      : $($cpu.Name -replace '\s+', ' ')" -ForegroundColor White
+    Write-Host "              $($cpu.NumberOfCores) cores · $($cpu.NumberOfLogicalProcessors) threads" -ForegroundColor DarkGray
+
+    # Storage Hardware Type (Filters out USB Pen Drives)
+    try {
+        $pDisks = Get-PhysicalDisk -EA SilentlyContinue | Where-Object { $_.Size -gt 0 -and $_.BusType -ne "USB" }
+        $diskTypes = ($pDisks | ForEach-Object { "$($_.MediaType) ($($_.BusType))" }) | Select-Object -Unique
+        Write-Host "   Disks    : $($diskTypes -join ' · ')" -ForegroundColor White
+    } catch {}
+
+    Write-Host ""
+
+    # ── SYSTEM TELEMETRY (GRAPHS) ──────────────────────────────────────
+    Write-Host "  📊 SYSTEM TELEMETRY " -ForegroundColor Cyan
+    Write-Host ""
+
+    # 1. RAM Graph
     $osInfo   = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
     $freeRam  = if ($osInfo) { [math]::Round($osInfo.FreePhysicalMemory / 1MB, 1) } else { 0 }
     $totalRam = if ($osInfo) { [math]::Round($osInfo.TotalVisibleMemorySize / 1MB, 1) } else { 0 }
-    $usedPct  = if ($totalRam -gt 0) { [math]::Round((1 - ($freeRam / $totalRam)) * 100) } else { 0 }
-    $barFill  = [math]::Round(($usedPct / 100) * 24)
-    $ramBar   = ("█" * $barFill) + ("░" * (24 - $barFill))
-    $ramColor = if ($usedPct -gt 88) {"Red"} elseif ($usedPct -gt 70) {"Yellow"} else {"Green"}
-    Write-Host ""; Write-Host "  ── System ────────────────────────────────────────────" -ForegroundColor DarkCyan
-    Write-Host "  RAM      : |$ramBar|  $usedPct% used  ·  ${freeRam} GB free" -ForegroundColor $ramColor
+    if ($totalRam -gt 0) {
+        $usedRam = [math]::Round($totalRam - $freeRam, 1)
+        $usedPct = [math]::Round(($usedRam / $totalRam) * 100)
+        $barFill = [math]::Round(($usedPct / 100) * 24)
+        $ramBar  = ("█" * $barFill) + ("░" * (24 - $barFill))
+        
+        $ramColor = "Green"; $ramTag = "[ OK ]"; $ramTip = "Memory is optimal."
+        if ($usedPct -gt 85) {
+            $ramColor = "Red"; $ramTag = "[ CRIT ]"; $ramTip = "Close heavy background apps. System is choking."
+        } elseif ($usedPct -gt 70) {
+            $ramColor = "Yellow"; $ramTag = "[ WARN ]"; $ramTip = "High load. AI inference might be slow."
+        }
+
+        Write-Host "   [ SYSTEM RAM ] $usedRam GB / $totalRam GB" -ForegroundColor White
+        Write-Host "   [$ramBar] $usedPct%" -ForegroundColor $ramColor
+        Write-Host "   Status: " -NoNewline -ForegroundColor DarkGray; Write-Host "$ramTag" -NoNewline -ForegroundColor $ramColor; Write-Host "▹$ramTip" -ForegroundColor DarkGray
+        Write-Host ""
+    }
+
+    # 2. GPU VRAM Graph (NVIDIA Hook)
+    try {
+        $gpus = Get-CimInstance Win32_VideoController
+        $nvidiaGPU = $gpus | Where-Object { $_.Name -match "NVIDIA" } | Select-Object -First 1
+        
+        if ($nvidiaGPU) {
+            $smiOut = (nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>$null)
+            if ($smiOut) {
+                $vUsed = [math]::Round([int]($smiOut.Split(',')[0].Trim()) / 1024, 1)
+                $vTot  = [math]::Round([int]($smiOut.Split(',')[1].Trim()) / 1024, 1)
+                $vFree = [math]::Round($vTot - $vUsed, 1)
+                
+                $vPct  = [math]::Round(($vUsed / $vTot) * 100)
+                $barFill = [math]::Round(($vPct / 100) * 24)
+                $vBar  = ("█" * $barFill) + ("░" * (24 - $barFill))
+
+                $vColor = "Green"; $vTag = "[ OK ]"; $vTip = "GPU is ready for local AI workloads."
+                if ($vPct -gt 90) {
+                    $vColor = "Red"; $vTag = "[ CRIT ]"; $vTip = "Run 'ai-stop' immediately to flush VRAM. Models will crash."
+                } elseif ($vPct -gt 70) {
+                    $vColor = "Yellow"; $vTag = "[ WARN ]"; $vTip = "VRAM is filling up. Switch to a smaller model if it stutters."
+                }
+
+                Write-Host "   [ GPU VRAM ] $($nvidiaGPU.Name)" -ForegroundColor White
+                Write-Host "   $vUsed GB used · $vFree GB free (Total: $vTot GB)" -ForegroundColor White
+                Write-Host "   [$vBar] $vPct%" -ForegroundColor $vColor
+                Write-Host "   Status: " -NoNewline -ForegroundColor DarkGray; Write-Host "$vTag" -NoNewline -ForegroundColor $vColor; Write-Host "▹$vTip" -ForegroundColor DarkGray
+                Write-Host ""
+            }
+        }
+    } catch {}
+
+    # 3. Storage Graph
+    try {
+        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
+        $sysTotalGB = 0; $sysFreeGB = 0; $driveList = @()
+        
+        foreach ($d in $drives) {
+            if ($d.Size -gt 0) {
+                $sysTotalGB += ($d.Size / 1GB)
+                $sysFreeGB  += ($d.FreeSpace / 1GB)
+                $driveList  += $d.DeviceID
+            }
+        }
+        
+        if ($sysTotalGB -gt 0) {
+            $sysTotalGB = [math]::Round($sysTotalGB, 1)
+            $sysFreeGB  = [math]::Round($sysFreeGB, 1)
+            $sysUsedGB  = [math]::Round($sysTotalGB - $sysFreeGB, 1)
+            
+            $sysPct  = [math]::Round(($sysUsedGB / $sysTotalGB) * 100)
+            $barFill = [math]::Round(($sysPct / 100) * 24)
+            $sysBar  = ("█" * $barFill) + ("░" * (24 - $barFill))
+            
+            $stoColor = "Cyan"; $stoTag = "[ OK ]"; $stoTip = "Storage is healthy."
+            
+            if ($sysFreeGB -lt 15 -or $sysPct -gt 95) {
+                $stoColor = "Red"; $stoTag = "[ CRIT ]"; $stoTip = "Delete old temp files immediately. OS will become unstable."
+            } elseif ($sysFreeGB -lt 30 -or $sysPct -gt 85) {
+                $stoColor = "Yellow"; $stoTag = "[ WARN ]"; $stoTip = "Time to run Disk Cleanup or delete old Git branches."
+            }
+
+            Write-Host "   [ DISK SPACE ] All Drives ($($driveList -join ', '))" -ForegroundColor White
+            Write-Host "   $sysUsedGB GB used · $sysFreeGB GB free (Total: $sysTotalGB GB)" -ForegroundColor White
+            Write-Host "   [$sysBar] $sysPct%" -ForegroundColor $stoColor
+            Write-Host "   Status: " -NoNewline -ForegroundColor DarkGray; Write-Host "$stoTag" -NoNewline -ForegroundColor $stoColor; Write-Host "▹$stoTip" -ForegroundColor DarkGray
+        }
+    } catch { }
+
     if ($osInfo) {
         $uptime = (Get-Date) - $osInfo.LastBootUpTime
-        Write-Host "  Uptime   : $($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "   Uptime: $($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m" -ForegroundColor DarkGray
     }
     Write-Host ""
 }
@@ -3084,6 +3409,78 @@ function ai-run {
 function ollama-start { ai-run }
 Set-Alias osve ollama-start
 
+function ai-data {
+    <#
+    .SYNOPSIS
+    Show what data AI Arsenal stores, where it lives, and optionally delete it.
+    .EXAMPLE
+    ai-data          ← show all stored data and sizes
+    ai-data -Delete  ← interactively delete specific files
+    ai-data -Nuke    ← wipe everything (keeps config)
+    #>
+    param([switch]$Delete, [switch]$Nuke)
+
+    $files = @{
+        "Config (name, role, API key)"   = "sc_config.json"
+        "Usage stats (command counts)"   = "sc_usage.json"
+        "Todos"                          = "sc_todos.json"
+        "Notes"                          = "sc_notes.json"
+        "Snippets"                       = "sc_snippets.json"
+        "Flashcard scores"               = "sc_flashcards.json"
+        "Timer log"                      = "sc_timer_log.json"
+    }
+
+    Write-Host ""
+    Write-Host "  [ AI ARSENAL · DATA STORAGE ]" -ForegroundColor DarkCyan
+    Write-Host "  Location: $Global:SC_DATA_DIR" -ForegroundColor DarkGray
+    Write-Host ""
+
+    foreach ($label in $files.Keys) {
+        $path = Join-Path $Global:SC_DATA_DIR $files[$label]
+        if (Test-Path $path) {
+            $sizeKB = [math]::Round((Get-Item $path).Length / 1KB, 1)
+            Write-Host "  [✓] $($label.PadRight(36)) $sizeKB KB" -ForegroundColor Green
+        } else {
+            Write-Host "  [~] $($label.PadRight(36)) (empty)" -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+
+    if ($Nuke) {
+        $confirm = (Read-Host "  ⚠  Delete ALL data except config? (yes/no)").Trim().ToLower()
+        if ($confirm -eq "yes") {
+            foreach ($label in $files.Keys) {
+                if ($label -like "*Config*") { continue }
+                $path = Join-Path $Global:SC_DATA_DIR $files[$label]
+                Remove-Item $path -EA SilentlyContinue
+            }
+            Write-Host "  [✓] All data cleared (config kept)." -ForegroundColor Green
+        } else { Write-Host "  [Cancelled]" -ForegroundColor DarkGray }
+        Write-Host ""; return
+    }
+
+    if ($Delete) {
+        Write-Host "  Which file to delete? (type label number or 0 to cancel)" -ForegroundColor Yellow
+        $keys = @($files.Keys)
+        for ($i = 0; $i -lt $keys.Count; $i++) {
+            Write-Host "  [$($i+1)] $($keys[$i])" -ForegroundColor Gray
+        }
+        Write-Host "  [0] Cancel" -ForegroundColor DarkGray
+        $choice = (Read-Host "  Choice").Trim()
+        if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $keys.Count) {
+            $selected = $keys[[int]$choice - 1]
+            $path = Join-Path $Global:SC_DATA_DIR $files[$selected]
+            Remove-Item $path -EA SilentlyContinue
+            Write-Host "  [✓] Deleted: $selected" -ForegroundColor Green
+        } else { Write-Host "  [Cancelled]" -ForegroundColor DarkGray }
+        Write-Host ""; return
+    }
+
+    Write-Host "  Options: ai-data -Delete  (pick a file)  |  ai-data -Nuke  (clear all except config)" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
 # ════════════════════════════════════════════════════════════════════════════
 #  SELF-TEST
 # ════════════════════════════════════════════════════════════════════════════
@@ -3091,7 +3488,7 @@ Set-Alias osve ollama-start
 function ai-self-test {
     <#
     .SYNOPSIS
-    Run a full system diagnostic. Use this after setup on a new machine.
+    Full system diagnostic — checks config, storage, connectivity, and live AI.
     .EXAMPLE
     ai-self-test
     #>
@@ -3099,7 +3496,7 @@ function ai-self-test {
     Write-Host "  ────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
     $pass  = 0
-    $total = 7
+    $total = 10
 
     function _Assert {
         param([string]$Name, [bool]$Cond, [string]$Fail, [string]$Fix = "")
@@ -3117,67 +3514,108 @@ function ai-self-test {
     $cfg = _SC-LoadConfig
 
     # 1. Config file
-    if (_Assert "Config file present" (Test-Path $Global:SC_CONFIG_FILE) `
-        "Config file not found at $($Global:SC_CONFIG_FILE)" `
+    if (_Assert "Config file present" `
+        (Test-Path $Global:SC_CONFIG_FILE) `
+        "Config file missing at $($Global:SC_CONFIG_FILE)" `
         "Run: ai-setup") { $pass++ }
 
-    # 2. Name
-    if (_Assert "User name configured" (-not [string]::IsNullOrWhiteSpace($cfg.UserName)) `
+    # 2. Data directory
+    if (_Assert "Data directory exists" `
+        (Test-Path $Global:SC_DATA_DIR) `
+        "Data folder missing: $Global:SC_DATA_DIR" `
+        "Run: ai-setup or restart the script") { $pass++ }
+
+    # 3. User name
+    if (_Assert "User name configured" `
+        (-not [string]::IsNullOrWhiteSpace($cfg.UserName)) `
         "Name is blank." "Run: ai-setup → step 1") { $pass++ }
 
-    # 3. Role
-    if (_Assert "Role configured" (-not [string]::IsNullOrWhiteSpace($cfg.Role)) `
+    # 4. Role
+    if (_Assert "Role configured" `
+        (-not [string]::IsNullOrWhiteSpace($cfg.Role)) `
         "Role is blank." "Run: ai-setup → step 2") { $pass++ }
 
-    # 4. AI backend reachable
+    # 5. AI backend
     $backendOk = $false
     if ($cfg.AIMode -eq "cloud") {
         $backendOk = -not [string]::IsNullOrWhiteSpace($cfg.APIKey)
-        if (_Assert "Cloud API key present" $backendOk `
-            "API key is empty — cloud AI will not work." `
-            "Run: ai-setup → step 3 → enter your key") { $pass++ }
+        if (_Assert "Cloud API key present ($($cfg.APIProvider))" $backendOk `
+            "API key is empty." `
+            "Run: ai-setup → enter your API key") { $pass++ }
     } else {
         $backendOk = _SC-OllamaReachable
-        if (_Assert "Ollama is reachable" $backendOk `
+        if (_Assert "Ollama reachable (local mode)" $backendOk `
             "Ollama is not running." `
-            "Run: ai-run  OR  open a terminal and type: ollama serve") { $pass++ }
+            "Run: ai-run  OR  ollama serve") { $pass++ }
     }
 
-    # 5. File read engine
-    $testFile   = Join-Path $env:TEMP "sc_selftest_dummy.txt"
+    # 6. Active model set
+    $modelOk = $false
+    if ($cfg.AIMode -eq "cloud") {
+        $modelOk = -not [string]::IsNullOrWhiteSpace($cfg.APIProvider)
+    } else {
+        $modelOk = -not [string]::IsNullOrWhiteSpace($cfg.LocalModel)
+    }
+    if (_Assert "AI model configured" $modelOk `
+        "No model is set." `
+        "Run: ai-setup  OR  ai-model <name>") { $pass++ }
+
+    # 7. File read/write
+    $testFile   = Join-Path $Global:SC_DATA_DIR "sc_selftest_dummy.txt"
     "FileEngineOK" | Set-Content $testFile -Encoding UTF8 -Force
     $readResult = _SC-ReadFile $testFile
     Remove-Item $testFile -EA SilentlyContinue
-    if (_Assert "File read/write engine" ($readResult.Trim() -eq "FileEngineOK") `
-        "Could not write and read a test file from $env:TEMP" `
-        "Check that $env:TEMP is writable and not full.") { $pass++ }
+    if (_Assert "File read/write engine" `
+        ($readResult.Trim() -eq "FileEngineOK") `
+        "Cannot write to $Global:SC_DATA_DIR" `
+        "Check folder permissions or disk space.") { $pass++ }
 
-    # 6. Snippet JSON round-trip  (uses a unique key to avoid stale-key false-fail)
-    $testKey  = "self-test-$(Get-Date -Format 'HHmmss')"
+    # 8. JSON storage round-trip
+    $testFile = Join-Path $Global:SC_DATA_DIR "sc_selftest.json"
     $jsonOk   = $false
     try {
-        ai-snippet save $testKey "ok-$testKey" 2>&1 | Out-Null
-        $snips  = _SC-LoadJson (Join-Path $env:TEMP "sc_snippets.json") "hashtable"
-        $jsonOk = $snips.ContainsKey($testKey) -and $snips[$testKey] -like "ok-*"
-        ai-snippet delete $testKey 2>&1 | Out-Null
+        $dummy = @{ test="ok" }
+        _SC-SaveJson $testFile $dummy
+        $read = _SC-LoadJson $testFile "hashtable"
+        if ($read.ContainsKey("test") -and $read["test"] -eq "ok") { $jsonOk = $true }
+        Remove-Item $testFile -EA SilentlyContinue
     } catch {}
     if (_Assert "JSON storage round-trip" $jsonOk `
-        "Snippet save/read failed." `
-        "Check that $env:TEMP is writable.") { $pass++ }
+        "Core JSON read/write failed." `
+        "Check that $Global:SC_DATA_DIR is writable.") { $pass++ }
 
-    # 7. Live inference
+    # 9. Internet connectivity (cloud only)
+    if ($cfg.AIMode -eq "cloud") {
+        $netOk = $false
+        try {
+            $null = Invoke-RestMethod -Uri "https://api.anthropic.com" -TimeoutSec 5 -EA Stop
+            $netOk = $true
+        } catch {
+            # A 4xx back means we reached the server — connectivity is fine
+            $netOk = $_.Exception.Message -match "400|401|403|404|405"
+        }
+        if (_Assert "Internet connectivity" $netOk `
+            "Cannot reach cloud API endpoints." `
+            "Check your network connection or firewall.") { $pass++ }
+    } else {
+        Write-Host "  [~] Internet check skipped (local mode)" -ForegroundColor DarkGray
+        $total--
+    }
+
+    # 10. Live inference
     $inferOk = $false
     if ($backendOk) {
         Write-Host "  [ ] Live AI inference..." -NoNewline -ForegroundColor DarkGray
         $resp    = _SC-Ask -Prompt "Reply with exactly the word: ARSENAL" `
-                            -System "Return only the single word ARSENAL. Nothing else." -Silent
+                           -System "Return only the single word ARSENAL. Nothing else." -Silent
         $inferOk = ($resp -match "ARSENAL")
         Write-Host "`r" -NoNewline
         if (_Assert "Live AI inference" $inferOk `
             "Model did not return expected response." `
-            "Try: ai-run (local)  OR  ai-setup to check your API key (cloud)") { $pass++ }
+            "Try: ai-run (local)  OR  check API key with ai-setup (cloud)") { $pass++ }
     } else {
-        Write-Host "  [~] Live inference skipped — AI backend not reachable." -ForegroundColor DarkGray
+        Write-Host "  [~] Live inference skipped — backend not reachable." -ForegroundColor DarkGray
+        $total--
     }
 
     Write-Host "  ────────────────────────────────────────────────────" -ForegroundColor DarkGray
@@ -3313,7 +3751,6 @@ $artBody
         }
         # Final clean render
         Clear-Host
-        Clear-Host
         try { [System.Console]::SetCursorPosition(0, $startY) } catch {}
         foreach ($line in $artLines) { Write-Host $line -ForegroundColor Green }
 
@@ -3349,135 +3786,154 @@ $artBody
     }
 
     _S "⚙  SETUP & SYSTEM"
-    _C "ai-setup"              "First-time wizard — name, AI backend, key, city."
+    _C "ai-setup"              "First-time wizard — name, role, AI backend, API key, city."
     _E "ai-setup"              "Run anytime to change any setting."
-    _C "ai-self-test"          "Full system diagnostic — verify everything works."
-    _E "ai-self-test"          "Fix the red items, then run it again."
-    _C "ai-run"                "Start Ollama and pick a model from a menu."
-    _E "ai-run"                "Use after ai-stop or on a fresh terminal."
-    _C "ai-stop"               "Flush VRAM / free RAM when AI is slow or crashing."
-    _E "ai-stop"               "[Y] = kill everything  [I] = unload model only."
-    _C "ai-model [name]"       "List or switch local Ollama models."
-    _E "ai-model gemma2:2b"    "Then run ai-run to load it into VRAM."
-    _C "ai-stats"              "Usage dashboard — commands, focus time, workspace."
+    _C "ai-self-test"          "Full diagnostic — config, storage, connectivity, live AI."
+    _E "ai-self-test"          "Fix the red items shown, then run again to confirm."
+    _C "ai-run"                "Start Ollama server and pick a model from a menu."
+    _E "ai-run"                "Run this after ai-stop or on a fresh terminal."
+    _C "ai-stop"               "Flush VRAM / free RAM when AI feels slow or crashes."
+    _E "ai-stop"               "[Y] kill everything  [I] unload model only  [S] skip."
+    _C "ai-model [name]"       "List installed Ollama models or switch active one."
+    _E "ai-model gemma2:2b"    "Run ai-run after switching to load it into VRAM."
+    _C "ai-stats"              "Usage dashboard — command counts, focus time, workspace."
+    _C "ai-data"               "See exactly what data is saved and where. Delete anytime."
+    _E "ai-data -Delete"       "Pick one file to delete."
+    _E "ai-data -Nuke"         "Wipe all data except your config."
     _D
 
     _S "⚡ QUICK AI & CHAT"
-    _C "ai `"question`""        "One-shot AI question — the fastest command."
+    _C "ai `"question`""        "One-shot AI answer — the fastest way to ask anything."
     _E "ai `"what is a deadlock?`""
-    _C "ai-ask `"question`""    "Fast factual answer — handles time/date locally."
+    _C "ai-ask `"question`""    "Factual answer — time/date/day handled locally, no AI call."
     _E "ai-ask `"what time is it?`""
-    _C "ai-chat"               "Multi-turn conversation with session memory."
-    _E "ai-chat"               "Type /file <path> inside to inject a file."
-    _C "ai-cmd `"task`""        "Describe a task → get a PowerShell command."
-    _E "ai-cmd `"list .java files modified today`"" "[R] to run it immediately."
-    _C "ai-clip [`"question`"]"  "Analyse text currently in your clipboard."
+    _C "ai-chat"               "Multi-turn conversation with full session memory."
+    _E "ai-chat"               "Inside chat: type /file <path> to inject any file."
+    _C "ai-cmd `"task`""        "Describe what you want → get a ready PowerShell command."
+    _E "ai-cmd `"list .java files modified today`"" "[R] runs it immediately."
+    _C "ai-clip [`"question`"]"  "Grab your clipboard text and ask AI about it."
     _E "ai-clip `"find bugs in this code`""
     _D
 
     _S "📂 FILES & FOLDERS"
-    _C "ai-sum `"path`""        "Summarise a PDF, Word doc, or text file."
+    _C "ai-sum `"path`""        "Summarise any PDF, Word doc, or text file with AI."
     _E "ai-sum `"report.pdf`""
-    _C "ai-file `"file`" `"q`""   "Ask a question about any file."
+    _C "ai-file `"file`" `"q`""   "Ask any question about the contents of a file."
     _E "ai-file `"config.json`" `"explain each setting`""
-    _C "ai-folder `"path`""     "Batch-analyse all code files in a folder."
+    _C "ai-folder `"path`""     "Batch-analyse every code file in a folder."
     _E "ai-folder `"./src`""
-    _C "ai-search `"query`""    "Search files by name. Add -Content for text search."
-    _E "ai-search `"login`" -Content"
-    _C "ai-copy `"path`""       "Copy a file's content to clipboard."
-    _E "ai-copy `"Main.java`""  "Then run ai-clip to ask questions about it."
-    _C "ai-fix `"file`""        "AI auto-fixes all bugs. Original is backed up."
-    _E "ai-fix `"script.py`""   "[Y] to save the fixed version."
+    _C "ai-search `"query`""    "Search your entire PC for files by name or content."
+    _E "ai-search `"login`""    "Add -Content to search inside files. -Path to narrow down."
+    _C "ai-copy `"path`""       "Copy a file's full content straight to your clipboard."
+    _E "ai-copy `"Main.java`""  "Then run ai-clip to ask AI questions about it."
+    _C "ai-fix `"file`""        "AI finds and fixes all bugs. Original is auto-backed up."
+    _E "ai-fix `"script.py`""   "[Y] to save  [N] to discard the fix."
     _D
 
     _S "🌐 MEDIA & WEB"
-    _C "ai-img `"path`" [`"q`"]"  "Describe or analyse an image / PDF page."
-    _E "ai-img `"error.png`" `"why did this fail?`""
-    _C "ai-ocr `"path`""        "Extract text from an image or scanned PDF."
+    _C "ai-img `"path`" [`"q`"]"  "Describe or analyse any image or PDF page visually."
+    _E "ai-img `"error.png`" `"why did this test fail?`""
+    _C "ai-ocr `"path`""        "Extract all text from an image or scanned PDF."
     _E "ai-ocr `"scan.pdf`""
-    _C "ai-web `"url`" [`"q`"]"   "Fetch a webpage and ask a question about it."
+    _C "ai-web `"url`" [`"q`"]"   "Fetch any webpage and ask AI a question about it."
     _E "ai-web `"docs.spring.io`" `"summarize Spring Boot setup`""
-    _C "ai-weather"             "Current weather + 3-day forecast + AQI."
-    _E "ai-weather"             "Set your city first: ai-setup → step 4."
-    _C "ai-open `"target`""     "Open an app, folder, or website by name."
-    _E "ai-open brave"          "Also works: ai-open youtube · ai-open vscode"
+    _C "ai-weather"             "Live weather + 3-day forecast + air quality index."
+    _E "ai-weather"             "Set your city once: ai-setup → step 4."
+    _C "ai-open `"target`""     "Open any app, folder, or website just by name."
+    _E "ai-open brave"          "Works with: youtube · vscode · whatsapp · spotify · discord"
     _D
 
     _S "🛠️  CODE QUALITY & GIT"
-    _C "ai-qa `"feature`""      "Generate Cucumber + TestNG test automation."
+    _C "ai-qa `"feature`""      "Generate full Cucumber + TestNG test automation code."
     _E "ai-qa `"user login with valid credentials`""
-    _C "ai-debug `"file`""      "Find bugs with line numbers and fix snippets."
-    _E "ai-debug `"App.java`""  "Then run ai-fix to apply them automatically."
-    _C "ai-test `"file`""       "Generate unit tests (happy path + edge cases)."
+    _C "ai-debug `"file`""      "Spot bugs with exact line numbers and fix snippets."
+    _E "ai-debug `"App.java`""  "Then run ai-fix to apply all fixes automatically."
+    _C "ai-test `"file`""       "Generate unit tests — happy path + all edge cases."
     _E "ai-test `"Utils.java`""
-    _C "ai-review `"file`""     "Senior-level code review (SOLID, security, etc)."
+    _C "ai-review `"file`""     "Senior-level code review — SOLID, security, performance."
     _E "ai-review `"Api.java`""
-    _C "ai-diff"                "AI review of staged + unstaged Git changes."
-    _E "ai-diff"                "Then run ai-commit to generate a commit message."
+    _C "ai-diff"                "AI review of all your staged and unstaged Git changes."
+    _E "ai-diff"                "Run ai-commit after to generate a commit message."
     _C "ai-commit"              "Generate Conventional Commit messages from staged diff."
-    _E "ai-commit"              "Stage files first: git add ."
-    _C "ai-git-push"            "Stage + commit + push — all in one command."
-    _E "ai-git-push"            "[Y] confirm · [E] edit message · [S] skip."
+    _E "ai-commit"              "Stage files first with: git add ."
+    _C "ai-git-push"            "Stage + commit + push — the entire Git flow in one command."
+    _E "ai-git-push"            "[Y] confirm  [E] edit message  [S] skip."
     _D
 
     _S "🎯 INTERVIEW PREP" "Magenta"
-    _C "ai-visual `"topic`""    "ASCII flow diagram. Add -Fancy for box diagram."
-    _E "ai-visual `"OAuth2 flow`" -Fancy"
-    _C "ai-mindmap `"topic`""   "Study guide + ASCII mind map tree."
+    _C "ai-visual `"topic`""    "Generate an ASCII flow diagram for any concept."
+    _E "ai-visual `"OAuth2 flow`" -Fancy" "Add -Fancy for a box-style diagram."
+    _C "ai-mindmap `"topic`""   "Full study guide + ASCII mind map tree."
     _E "ai-mindmap `"Java Collections`""
-    _C "ai-flashcard `"topic`"" "Spaced-repetition flashcard with scoring."
-    _E "ai-flashcard `"SQL`""   "Answer out loud — get graded CORRECT/PARTIAL/WRONG."
-    _C "ai-explain `"input`""   "Line-by-line breakdown + gotcha + interview tip."
+    _C "ai-flashcard `"topic`"" "Spaced-repetition flashcard session with live scoring."
+    _E "ai-flashcard `"SQL`""   "Answer out loud — graded CORRECT / PARTIAL / WRONG."
+    _C "ai-explain `"input`""   "Line-by-line breakdown + common gotcha + interview tip."
     _E "ai-explain `"HashMap internals`""
-    _C "ai-cheatsheet `"topic`"" "Compact emoji cheatsheet for quick revision."
+    _C "ai-cheatsheet `"topic`"" "Compact emoji cheatsheet — perfect for last-minute revision."
     _E "ai-cheatsheet `"git commands`""
-    _C "ai-interview `"topic`"" "Single mock question with score and model answer."
-    _E "ai-interview `"Java`""  "Answer naturally to get a score out of 10."
-    _C "ai-mock `"role`""       "Full 5-question mock session with final verdict."
-    _E "ai-mock `"Java SDET`""  "Takes ~10 min · gives READY / NEEDS PREP verdict."
-    _C "ai-jd [`"path`"]"        "Analyse a Job Description for gaps + prep tips."
+    _C "ai-interview `"topic`"" "One mock question, scored out of 10 with model answer."
+    _E "ai-interview `"Java`""  "Answer naturally — AI grades your depth and accuracy."
+    _C "ai-mock `"role`""       "Full 5-question mock interview with final READY verdict."
+    _E "ai-mock `"Java SDET`""  "Takes ~10 min — gives honest READY / NEEDS PREP result."
+    _C "ai-jd [`"path`"]"        "Analyse a Job Description — spot gaps, get prep tips."
     _E "ai-jd `"jd.txt`""
     _D
 
     _S "📝 WORKSPACE & PRODUCTIVITY" "DarkYellow"
-    _C "ai-note `"text`""       "Save a persistent note."
+    _C "ai-note `"text`""       "Save a quick note that persists across sessions."
     _E "ai-note `"review ArrayDeque before interview`""
-    _C "ai-notes"               "List all saved notes."
-    _C "ai-note-clear"          "Delete all notes permanently (asks for confirmation)."
-    _C "ai-todo `"task`""       "Add a task to your to-do list."
+    _C "ai-notes"               "List every note you have saved."
+    _C "ai-note-clear"          "Permanently delete all notes (asks confirmation first)."
+    _C "ai-todo `"task`""       "Add a task to your personal to-do list."
     _E "ai-todo `"fix Selenium grid config`""
-    _C "ai-todos"               "View all todos (pending and completed)."
-    _C "ai-done <id>"           "Mark a todo complete by ID."
+    _C "ai-todos"               "View all todos — pending shown first, completed below."
+    _C "ai-done <id>"           "Mark a todo as complete by its ID number."
     _E "ai-done 3"
-    _C "ai-snippet save/get/list/delete" "Manage reusable code snippets."
+    _C "ai-snippet save/get"    "Save and retrieve reusable code snippets by key name."
     _E "ai-snippet save `"db-url`" `"jdbc:...`"" "ai-snippet get `"db-url`" to retrieve + copy."
-    _C "ai-translate `"text`" `"Lang`"" "Translate text. No args = interactive mode."
+    _C "ai-translate `"text`" `"Lang`"" "Translate any text. No args = interactive mode."
     _E "ai-translate `"Hello!`" `"French`""
-    _C "ai-timer [min] [`"label`"]" "Focus timer with live bar + beep when done."
-    _E "ai-timer 45 `"Deep Work`"" "ai-timer-log to view history."
-    _C "ai-history `"query`" [-AI]" "Search PowerShell history. -AI = smart search."
-    _E "ai-history `"git push`" -AI"
-    _C "ai-standup [`"extra`"]"  "Auto-generate standup from Git + todos."
-    _E "ai-standup `"blocked by QA`"" "Copy and paste into Slack / Teams."
+    _C "ai-timer [min] [`"label`"]" "Focus timer with live progress bar + beep on finish."
+    _E "ai-timer 45 `"Deep Work`"" "Run ai-timer-log to see your full focus history."
+    _C "ai-history `"query`" [-AI]" "Search your PowerShell command history smartly."
+    _E "ai-history `"git push`" -AI" "-AI uses natural language — no exact match needed."
+    _C "ai-standup [`"extra`"]"  "Auto-generate your daily standup from Git + todos."
+    _E "ai-standup `"blocked by QA`"" "Copy and paste straight into Slack or Teams."
 
     # ── System snapshot ────────────────────────────────────────────────────
     _D
+    Write-Host "  💻  SYSTEM" -ForegroundColor Yellow
     $osInfo   = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
     $freeRam  = if ($osInfo) { [math]::Round($osInfo.FreePhysicalMemory / 1MB, 1) } else { 0 }
     $totalRam = if ($osInfo) { [math]::Round($osInfo.TotalVisibleMemorySize / 1MB, 1) } else { 0 }
-    $usedPct  = if ($totalRam -gt 0) { [math]::Round((1 - ($freeRam / $totalRam)) * 100) } else { 0 }
-    $barFill  = [math]::Round(($usedPct / 100) * 24)
-    $ramBar   = ("█" * $barFill) + ("░" * (24 - $barFill))
-    $ramColor = if ($usedPct -gt 88) {"Red"} elseif ($usedPct -gt 70) {"Yellow"} else {"Green"}
-    Write-Host "  💻  SYSTEM" -ForegroundColor Yellow
-    Write-Host "  🧠  RAM    : |$ramBar|  $usedPct% used  ·  ${freeRam} GB free" -ForegroundColor $ramColor
+    if ($totalRam -gt 0) {
+        $usedPct  = [math]::Round((1 - ($freeRam / $totalRam)) * 100)
+        $barFill  = [math]::Round(($usedPct / 100) * 20)
+        $ramBar   = ("█" * $barFill) + ("░" * (20 - $barFill))
+        $ramColor = if ($usedPct -gt 85) {"Red"} elseif ($usedPct -gt 70) {"Yellow"} else {"Green"}
+        Write-Host "  🧠  RAM    : [$ramBar] $usedPct% used" -ForegroundColor $ramColor
+    }
+    
+    try {
+        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
+        $sysTot = 0; $sysFree = 0
+        foreach ($d in $drives) { $sysTot += $d.Size; $sysFree += $d.FreeSpace }
+        if ($sysTot -gt 0) {
+            $sPct  = [math]::Round((($sysTot - $sysFree) / $sysTot) * 100)
+            $sFill = [math]::Round(($sPct / 100) * 20)
+            $sBar  = ("█" * $sFill) + ("░" * (20 - $sFill))
+            $sCol  = if ($sPct -gt 90) {"Red"} elseif ($sPct -gt 75) {"Yellow"} else {"Cyan"}
+            Write-Host "  💾  DISK   : [$sBar] $sPct% used" -ForegroundColor $sCol
+        }
+    } catch {}
+
     if ($osInfo) {
         $uptime = (Get-Date) - $osInfo.LastBootUpTime
         Write-Host "  ⏱   Uptime : $($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m" -ForegroundColor DarkGray
     }
 
     # Session log
-    $slogFile = Join-Path $env:TEMP "sc_session.json"
+    $slogFile = Join-Path $Global:SC_DATA_DIR "sc_session.json"
     $last     = "First session"
     try {
         if (Test-Path $slogFile) { 
