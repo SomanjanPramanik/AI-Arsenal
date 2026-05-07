@@ -25,8 +25,16 @@
 
 
 \---
-
-
+## 📁 Project Structure
+```
+AI-Arsenal/
+├── src/
+│   └── ai-arsenal.ps1        ← the main script — paste into $PROFILE
+├── testing/
+│   └── Test-AIArsenal.ps1    ← automated test runner (95 assertions)
+└── README.md
+```
+\---
 
 \## ✨ Core Features
 
@@ -112,7 +120,21 @@
 
 \* \*(Optional)\* Python 3.8+ (for OCR and local PDF parsing)
 
+\---
 
+## 🧪 Running the Tests
+
+Load your profile first, then run the test runner from the `testing/` folder:
+
+```powershell
+. $PROFILE
+.\testing\Test-AIArsenal.ps1
+```
+
+Optional flags:
+- `-Verbose` — show passing tests too
+- `-Category Internal` — only test `_SC-*` engine functions
+- `-Category Public` — only test `ai-*` commands
 
 \---
 

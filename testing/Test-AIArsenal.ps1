@@ -65,7 +65,7 @@ function Assert {
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Magenta
 Write-Host "  ║    AI ARSENAL — AUTOMATED TEST RUNNER  v1.0     ║" -ForegroundColor Magenta
-Write-Host "  ║    Testing all 74 functions as dummy calls       ║" -ForegroundColor DarkGray
+Write-Host "  ║    Testing 95 assertions across all functions    ║" -ForegroundColor DarkGray
 Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Magenta
 Write-Host ""
 
@@ -179,7 +179,7 @@ Assert "_SC-Trim truncates when over limit" {
 
 Assert "_SC-Trim respects custom -max" {
     $s = "A" * 500
-    $r = _SC-Trim $s -max 100
+    $r = _SC-Trim -s $s -max 100
     $r.Length -le 110   # allows for the truncation suffix
 }
 
@@ -446,11 +446,14 @@ _T-Head "PUBLIC — Files & Folders"
 $tmpTxt = Join-Path $env:TEMP "sc_autotest_$(Get-Random).txt"
 "Hello this is a test file for AI Arsenal autotest." | Set-Content $tmpTxt -Encoding UTF8
 
+$clipUnavailable = try { Set-Clipboard -Value "probe"; (Get-Clipboard -Raw) -ne "probe" } catch { $true }
+$clipUnavailable = if ($clipUnavailable) { "clipboard unavailable in this session" } else { "" }
+
 Assert "ai-copy copies file content to clipboard" {
     ai-copy $tmpTxt *>&1 | Out-Null
     $clip = [string](Get-Clipboard -Raw -EA SilentlyContinue)
     $clip -match "autotest"
-}
+} -SkipIf $clipUnavailable
 
 Assert "ai-search runs and produces output (name search)" {
     $leaf = Split-Path $tmpTxt -Leaf
@@ -576,7 +579,7 @@ Assert "ai-diff shows error outside git repo" {
     $out = ai-diff *>&1 | Out-String
     Pop-Location
     Remove-Item $tmpDir -Force -Recurse -EA SilentlyContinue
-    $out -match "not inside|Git repository|not a git"
+    $out -match "not inside|Git repository|not a git|not inside a Git"
 }
 
 Assert "ai-commit shows error outside git repo" {
@@ -586,7 +589,7 @@ Assert "ai-commit shows error outside git repo" {
     $out = ai-commit *>&1 | Out-String
     Pop-Location
     Remove-Item $tmpDir -Force -Recurse -EA SilentlyContinue
-    $out -match "not inside|Git repository|not a git"
+    $out -match "not inside|Git repository|not a git|not inside a Git"
 }
 
 Assert "ai-git-push shows error outside git repo" {
@@ -596,7 +599,7 @@ Assert "ai-git-push shows error outside git repo" {
     $out = ai-git-push *>&1 | Out-String
     Pop-Location
     Remove-Item $tmpDir -Force -Recurse -EA SilentlyContinue
-    $out -match "not inside|Git repository|not a git"
+    $out -match "not inside|Git repository|not a git|not inside a Git"
 }
 
 Assert "ai-standup runs without throwing" {

@@ -1,0 +1,98 @@
+AI Arsenal — Test Run: 2026-05-07 19:13:44
+Mode: local  |  Pass: 94  Fail: 0  Skip: 1
+────────────────────────────────────────────────────────────
+PASS  | _SC-LoadConfig returns object
+PASS  | _SC-LoadConfig has all required keys
+PASS  | _SC-SaveConfig round-trip
+PASS  | _SC-LoadJson returns empty array for missing file
+PASS  | _SC-LoadJson returns empty hashtable for missing file
+PASS  | _SC-SaveJson + _SC-LoadJson round-trip (array)
+PASS  | _SC-SaveJson + _SC-LoadJson round-trip (hashtable)
+PASS  | _SC-LoadJson handles empty file without throwing
+PASS  | _SC-LoadJson handles corrupted JSON without throwing
+PASS  | _SC-Trim returns string unchanged when under limit
+PASS  | _SC-Trim truncates when over limit
+PASS  | _SC-Trim respects custom -max
+PASS  | _SC-StripFences removes markdown code fences
+PASS  | _SC-StripFences passes plain text unchanged
+PASS  | _SC-SystemPrompt returns non-empty string
+PASS  | _SC-SystemPrompt includes role when configured
+PASS  | _SC-ReadFile reads a plain text file
+PASS  | _SC-ReadFile returns empty string for missing file
+PASS  | _SC-ReadFile handles unsupported extension gracefully
+PASS  | _SC-GetFreeRAM_GB returns a number
+PASS  | _SC-GetFreeRAM_GB returns positive value or 999 sentinel
+PASS  | _SC-WarnLowRAM does not throw
+PASS  | _SC-AutoFlushIfNeeded does not throw
+PASS  | _SC-OllamaReachable returns boolean
+PASS  | _SC-OllamaListModels returns array
+PASS  | _SC-Track writes to usage file without throwing
+PASS  | _SC-Track increments count correctly
+PASS  | ai-setup function exists
+PASS  | ai-self-test function exists
+PASS  | ai-model function exists and handles empty name
+PASS  | ai-stats function exists and does not throw
+PASS  | ai-data function exists and lists files without throwing
+PASS  | ai-stop function exists
+PASS  | ai-run function exists
+PASS  | ollama-start alias resolves
+PASS  | ai-quick function exists
+PASS  | ai-help function exists
+PASS  | ai-note saves a note
+PASS  | ai-notes lists notes without throwing
+PASS  | ai-note-clear function exists
+PASS  | ai-todo adds a task
+PASS  | ai-todos lists without throwing
+PASS  | ai-done marks a todo complete
+PASS  | ai-done rejects invalid ID gracefully
+PASS  | ai-snippet save works
+PASS  | ai-snippet get retrieves value
+PASS  | ai-snippet list shows saved snippets
+PASS  | ai-snippet delete removes entry
+PASS  | ai-snippet invalid action shows error
+PASS  | ai-copy copies file content to clipboard
+PASS  | ai-search runs and produces output (name search)
+PASS  | ai-search with -Content switch does not throw
+PASS  | ai-search with bad -Path shows error
+PASS  | ai-folder rejects missing path
+PASS  | ai-folder rejects empty folder
+PASS  | ai-sum rejects missing file
+PASS  | ai-file rejects missing file
+PASS  | ai-fix rejects missing file
+PASS  | ai-debug rejects missing file
+PASS  | ai-test rejects missing file
+PASS  | ai-review rejects missing file
+PASS  | ai-img rejects missing file
+PASS  | ai-img rejects unsupported extension
+PASS  | ai-ocr rejects missing file
+PASS  | ai-web prepends https:// to bare URLs
+SKIP  | ai-weather shows error when city not configured | city is configured — skipping no-city guard test
+PASS  | ai-weather runs without throwing when city set
+PASS  | ai-open function exists
+PASS  | ai-diff shows error outside git repo
+PASS  | ai-commit shows error outside git repo
+PASS  | ai-git-push shows error outside git repo
+PASS  | ai-standup runs without throwing
+PASS  | ai-visual function exists
+PASS  | ai-mindmap function exists
+PASS  | ai-interview function exists
+PASS  | ai-mock function exists
+PASS  | ai-flashcard function exists
+PASS  | ai-explain function exists with correct param name
+PASS  | ai-cheatsheet function exists
+PASS  | ai-jd function exists
+PASS  | ai-translate function exists
+PASS  | ai-timer rejects invalid duration
+PASS  | ai-timer rejects zero duration
+PASS  | ai-timer-log runs without throwing
+PASS  | ai-history function exists
+PASS  | ai-history returns results or no-match message
+PASS  | ai function exists
+PASS  | ai-ask function exists
+PASS  | ai-ask handles time question locally (no AI call)
+PASS  | ai-ask handles date question locally (no AI call)
+PASS  | ai-chat function exists
+PASS  | ai-cmd function exists
+PASS  | ai-clip handles empty clipboard gracefully
+PASS  | ai-qa function exists
+PASS  | _SC-CallCloud returns empty string with no API key

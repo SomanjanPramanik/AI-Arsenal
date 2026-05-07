@@ -96,6 +96,7 @@ function _SC-LoadConfig {
             if ($null -ne $json.AnimStyle)   { $defaults.AnimStyle   = $json.AnimStyle }
             if ($null -ne $json.Role)        { $defaults.Role        = $json.Role }
             if ($null -ne $json.SetupDone)   { $defaults.SetupDone   = $json.SetupDone }
+            if ($null -ne $json.CloudModel)  { $defaults.CloudModel  = $json.CloudModel }
         } catch { 
             # If the file is corrupted, it safely falls back to defaults
         }
@@ -119,7 +120,7 @@ function _SC-SaveConfig {
             AnimStyle   = [string]$Config.AnimStyle
             Role        = [string]$Config.Role
             SetupDone   = $Config.SetupDone
-            CloudModel  = ""
+            CloudModel  = [string]$Config.CloudModel
         }
         foreach ($k in @($safe.Keys)) {
             if ($safe[$k] -is [string]) {
@@ -669,6 +670,7 @@ function _SC-CallCloud {
                 }
             }
         }
+        return ""
     }
 
     if ($cfg.APIProvider -eq "groq") {
@@ -696,6 +698,7 @@ function _SC-CallCloud {
                 }
             }
         }
+        return ""
     }
 
     if ($cfg.APIProvider -eq "openrouter") {
@@ -727,6 +730,7 @@ function _SC-CallCloud {
                 }
             }
         }
+        return ""
     }
     Write-Host "  [✗] No cloud provider is configured." -ForegroundColor Red
     Write-Host "      Fix: ai-setup  →  choose option 2 (Claude) or 3 (OpenAI)." -ForegroundColor Cyan
@@ -746,12 +750,17 @@ function _SC-CallOllama {
     )
     if ([string]::IsNullOrWhiteSpace($System)) { $System = _SC-SystemPrompt }
 
-    # Pre-flight: warn if model is too large for available VRAM (GTX 1650 = 4GB)
+    # Pre-flight: warn if model is too large for available VRAM
     try {
-        $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "NVIDIA" }
-        $vramGB = [math]::Round($gpu.AdapterRAM / 1GB)
-        if ($Model -match "7b|8b|13b" -and $vramGB -lt 6) {
-            Write-Host "  [!] '$Model' exceeds ${vramGB}GB VRAM — running on system RAM (expect slower response)." -ForegroundColor DarkYellow
+        $gpu = Get-CimInstance Win32_VideoController |
+               Where-Object { $_.Name -match "NVIDIA|AMD|Radeon|Intel" } |
+               Sort-Object AdapterRAM -Descending |
+               Select-Object -First 1
+        if ($null -ne $gpu -and $gpu.AdapterRAM -gt 0) {
+            $vramGB = [math]::Round($gpu.AdapterRAM / 1GB)
+            if ($Model -match "7b|8b|13b" -and $vramGB -lt 6) {
+                Write-Host "  [!] '$Model' exceeds ${vramGB}GB VRAM — running on system RAM (expect slower response)." -ForegroundColor DarkYellow
+            }
         }
     } catch {}
 
@@ -883,12 +892,15 @@ function _SC-Ask {
 # ── HELPER UTILITIES ──────────────────────────────────────────────────────
 
 function _SC-Trim {
-    param([string]$s, [int]$max = $Global:SC_MAX_CHARS)
+    param(
+        [Parameter(Position=0)][string]$s,
+        [Parameter(Position=1)][int]$max = $Global:SC_MAX_CHARS
+    )
     if ($s.Length -gt $max) {
         $cut = $s.LastIndexOf("`n", $max)
         if ($cut -lt 0) { $cut = $max }
         Write-Host "  ⚠  File truncated to ~$([math]::Round($cut/1000))k chars (model limit)" -ForegroundColor Yellow
-        return $s.Substring(0, $cut) + "`n...[truncated]"
+        return $s.Substring(0, $cut) + "…[cut]"
     }
     return $s
 }
@@ -1172,11 +1184,17 @@ function ai-cmd {
     $choice = (Read-Host "  Choice").Trim().ToUpper()
     switch ($choice) {
         "R" {
-            Write-Host "  Running..." -ForegroundColor DarkGray
-            try { Invoke-Expression $cmd }
-            catch {
-                Write-Host "  [✗] Command failed: $($_.Exception.Message)" -ForegroundColor Red
-                Write-Host "      You can copy it with [C] and run it manually to see the full error." -ForegroundColor DarkGray
+            $dangerous = $cmd -match '\b(Remove-Item|rd\s|rmdir|del\s|Format-|Clear-Disk|Stop-Process|Stop-Service|Invoke-Expression|iex\s|reg\s+delete|net\s+user)\b'
+            if ($dangerous) {
+                Write-Host "  [⚠] Potentially destructive command detected." -ForegroundColor Red
+                Write-Host "      Auto-run blocked for safety. Copy it manually with [C] and review first." -ForegroundColor Yellow
+            } else {
+                Write-Host "  Running..." -ForegroundColor DarkGray
+                try { Invoke-Expression $cmd }
+                catch {
+                    Write-Host "  [✗] Command failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "      You can copy it with [C] and run it manually to see the full error." -ForegroundColor DarkGray
+                }
             }
         }
         "C" { Set-Clipboard -Value $cmd; Write-Host "  [✓] Copied to clipboard." -ForegroundColor Green }
@@ -1336,172 +1354,279 @@ function ai-copy {
 function ai-search {
     <#
     .SYNOPSIS
-    Search for files by name, or search inside files for text.
+    Search your entire machine for files by name or content.
+    Searches all drives. Case-insensitive. Partial match supported.
     .EXAMPLE
-    ai-search "LoginPage"                        ← search everywhere on this PC
-    ai-search "driver.findElement" -Content      ← search inside file contents
-    ai-search "config" -Path "C:\Projects"       ← search in a specific folder
+    ai-search "login"                          <- finds LoginPage.java, login_config.xml, etc.
+    ai-search "roadmap" -Path "C:\Users"       <- narrow to a folder
+    ai-search "driver.findElement" -Content    <- search inside files
+    ai-search "config" -Path "D:\" -Content    <- content search on specific drive
     #>
     param(
         [Parameter(Mandatory)][string]$Query,
-        [string]$Path,
+        [string]$Path = "",
         [switch]$Content
     )
     _SC-Track "ai-search"
 
-    # ── RISK CLASSIFIER ───────────────────────────────────────────────────
-    function _SC-FileRisk {
-        param([string]$FullPath)
-        $p = $FullPath.ToLower()
-        if ($p -match 'windows\\system32|windows\\syswow64|windows\\winsxs|windows\\boot|
-                        windows\\servicing|appdata\\local\\temp|appdata\\roaming\\microsoft\\windows|
-                        programdata\\microsoft|ntuser\.dat|system\.ini|win\.ini') {
-            return @{ Level = "SYSTEM"; Icon = "🔴"; Color = "Red"
-                      Warning = "SYSTEM FILE — Modifying this can break Windows. Do not touch." }
-        }
-        if ($p -match 'program files|appdata\\local\\programs|appdata\\roaming|
-                        programdata|windows\\|system volume information|
-                        \.dll$|\.sys$|\.exe$|\.reg$|\.msi$') {
-            return @{ Level = "PROTECTED"; Icon = "🟡"; Color = "Yellow"
-                      Warning = "PROTECTED — App/system config. Developers: edit carefully. Regular users: leave it." }
-        }
-        return @{ Level = "SAFE"; Icon = "🟢"; Color = "Green"; Warning = "" }
-    }
-
-    # ── BREADCRUMB BUILDER ────────────────────────────────────────────────
-    function _SC-Breadcrumb {
-        param([string]$FullPath, [string]$FileIcon)
-        $parts = $FullPath -split '\\'
-        $crumb = "     💻"
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ([string]::IsNullOrWhiteSpace($parts[$i])) { continue }
-            if ($i -eq $parts.Count - 1) { $crumb += " > $FileIcon $($parts[$i])" }
-            else                         { $crumb += " > 📂 $($parts[$i])" }
-        }
-        return $crumb
-    }
-
-    # ── RESULT PRINTER ────────────────────────────────────────────────────
-    function _SC-PrintResult {
-        param($Item)
-        $icon       = if ($Item.PSIsContainer) {"📁"} else {"📄"}
-        $risk       = _SC-FileRisk $Item.FullName
-        $crumb      = _SC-Breadcrumb $Item.FullName $icon
-        $crumbColor = switch ($risk.Level) { "SYSTEM" {"Red"} "PROTECTED" {"Yellow"} default {"DarkCyan"} }
-
-        Write-Host "  $($risk.Icon) $icon $($Item.FullName)" -ForegroundColor $risk.Color
-        Write-Host $crumb -ForegroundColor $crumbColor
-
-        if (-not $Item.PSIsContainer) {
-            $sizeKB = [math]::Round($Item.Length / 1KB, 1)
-            $age    = (Get-Date) - $Item.LastWriteTime
-            $when   = if ($age.Days -eq 0)        { "today" } `
-                 elseif ($age.Days -eq 1)          { "yesterday" } `
-                 elseif ($age.Days -lt 7)          { "$($age.Days)d ago" } `
-                 elseif ($age.Days -lt 30)         { "$([math]::Round($age.Days/7))w ago" } `
-                 else                              { "$([math]::Round($age.Days/30))mo ago" }
-            Write-Host "     📊 $sizeKB KB · modified $when" -ForegroundColor DarkGray
-        }
-    }
-
-    # ── BUILD SEARCH ROOTS ────────────────────────────────────────────────
-    if ($Path) {
+    # ── Resolve drives / path ────────────────────────────────────────────────
+    $isGlobal = [string]::IsNullOrWhiteSpace($Path)
+    $searchRoots = if ($isGlobal) {
+        @(Get-PSDrive -PSProvider FileSystem -EA SilentlyContinue | 
+            Where-Object { Test-Path $_.Root } | 
+            Where-Object { $_.Root -match '^[A-Z]:\\$' } |
+            ForEach-Object { $_.Root }) 
+    } else {
         if (-not (Test-Path $Path -PathType Container)) {
+            Write-Host ""
             Write-Host "  [✗] Folder not found: $Path" -ForegroundColor Red
             Write-Host "      Current directory: $(Get-Location)" -ForegroundColor DarkGray
+            Write-Host ""
             return
         }
-        $searchRoots = @($Path)
-    } else {
-        $searchRoots = @(
-            "$env:USERPROFILE\Documents",
-            "$env:USERPROFILE\Desktop",
-            "$env:USERPROFILE\Downloads",
-            "$env:USERPROFILE\Pictures",
-            "$env:USERPROFILE\Videos",
-            "$env:USERPROFILE\Music",
-            "C:\Local AI"
-        )
-        $extraDrives = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -notmatch '^C:\\$' }).Root
-        foreach ($d in $extraDrives) { if (Test-Path $d) { $searchRoots += $d } }
-        $searchRoots = $searchRoots | Where-Object { Test-Path $_ } | Select-Object -Unique
+        @($Path)
     }
 
     Write-Host ""
     Write-Host "  [ ai-search ] '$Query'" -ForegroundColor DarkCyan
-    Write-Host ""
-
-    # ── FILE NAME SEARCH ──────────────────────────────────────────────────
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-    $nameResults = @(foreach ($root in $searchRoots) {
-        Get-ChildItem -Path $root -Recurse -EA SilentlyContinue |
-            Where-Object { $_.Name -match [regex]::Escape($Query) }
-    })
-
-    $sw.Stop()
-
-    if ($nameResults.Count -gt 0) {
-        Write-Host "  ── Files matching name ($($nameResults.Count)) ──────────────────" -ForegroundColor Cyan
-        Write-Host ""
-
-        $sorted = $nameResults | Sort-Object {
-            switch ((_SC-FileRisk $_.FullName).Level) { "SAFE" {0} "PROTECTED" {1} "SYSTEM" {2} }
-        }
-        foreach ($item in $sorted) { _SC-PrintResult $item }
-
-        if ($sw.Elapsed.TotalSeconds -gt 2.5 -and
-            $nameResults.Count -gt 15 -and
-            -not $Global:SC_PathTipShown) {
-            Write-Host "  💡 Too many results? Try: ai-search `"$Query`" -Path `"C:\YourFolder`" to narrow it down." -ForegroundColor DarkGray
-            $Global:SC_PathTipShown = $true
-        }
+    if ($isGlobal) {
+        $driveList = ($searchRoots -join "  ")
+        Write-Host "  [~] Scanning all drives: $driveList" -ForegroundColor DarkGray
     } else {
-        Write-Host "  [~] No files found matching '$Query' on this PC 💻" -ForegroundColor Yellow
+        Write-Host "  [~] Searching in: $Path" -ForegroundColor DarkGray
     }
 
-    # ── CONTENT SEARCH ────────────────────────────────────────────────────
+    # ── Colour logic ─────────────────────────────────────────────────────────
+    function _Get-FileColour { 
+        param([string]$p)
+        if     ($p -match '^[A-Z]:\\(Windows|System32|SysWOW64|WinSxS|Boot|Recovery|Microsoft\.NET)') { return "Red"    }
+        elseif ($p -match '^[A-Z]:\\(Program Files|Program Files \(x86\)|ProgramData|AMD|NVIDIA|Intel|HP|Dell|Lenovo)') { return "Yellow" }
+        else   { return "Green" }
+    }
+
+    function _Get-ColourDot {
+        param([string]$c)
+        switch ($c) { "Green" {"🟢"} "Yellow" {"🟡"} "Red" {"🔴"} default {"⚪"} }
+    }
+
+    function _Get-ColourMessage {
+        param([string]$c, [string]$p)
+        switch ($c) {
+            "Green"  { "  ✅  Your file — safe to open, edit, and share." }
+            "Yellow" {
+                if ($p -match '\.(log|dmp|tmp)$') {
+                    "  ⚠️   App / driver log — safe to read. Don't delete unless you know what it does."
+                } else {
+                    "  ⚠️   Lives in system / program territory — read carefully before touching anything here."
+                }
+            }
+            "Red"    { "  🔴  Windows internal — developers and admins only. Do not modify." }
+        }
+    }
+
+    # ── Tip rate-limiting (once every 7 slow searches) ───────────────────────
+    $tipFile  = Join-Path $Global:SC_DATA_DIR "sc_search_tip.json"
+    $tipData  = try { Get-Content $tipFile -Raw -EA Stop | ConvertFrom-Json } catch { [PSCustomObject]@{ count = 0 } }
+    $tipCount = [int]$tipData.count + 1
+    $showTip  = ($tipCount -le 3) -or ($tipCount % 7 -eq 0)
+    try { [PSCustomObject]@{ count = $tipCount } | ConvertTo-Json -Compress | Set-Content $tipFile -Encoding UTF8 -Force } catch {}
+
+    # ── Launch parallel jobs — one per drive ─────────────────────────────────
+    $sw   = [System.Diagnostics.Stopwatch]::StartNew()
+    $jobs = foreach ($root in $searchRoots) {
+        Start-Job -ScriptBlock {
+            param($root, $query)
+            Get-ChildItem -Path $root -Recurse -EA SilentlyContinue |
+                Where-Object { $_.Name -imatch [regex]::Escape($query) } |
+                Select-Object -First 50 |
+                Select-Object FullName, PSIsContainer, `
+                @{N='Length';E={[long]$_.Length}}, `
+                @{N='LastWriteTime';E={[datetime]$_.LastWriteTime}}
+        } -ArgumentList $root, $Query
+    }
+
+    # ── Spinner while jobs run ───────────────────────────────────────────────
+    $spinner   = [char[]]@('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    $spinIdx   = 0
+    $tipShown  = $false
+
+    while ($jobs | Where-Object { $_.State -eq "Running" }) {
+        $frame = $spinner[$spinIdx % $spinner.Length]
+        Write-Host "`r  🔍 Searching $frame   " -NoNewline -ForegroundColor DarkCyan
+        $spinIdx++
+        Start-Sleep -Milliseconds 80
+
+        if (-not $tipShown -and $showTip -and $sw.Elapsed.TotalSeconds -ge 5) {
+            Write-Host "`r                              " -NoNewline  # clear spinner line
+            Write-Host ""
+            Write-Host "  💡 Taking a while? Narrow it down with -Path:" -ForegroundColor DarkYellow
+            Write-Host "     ai-search `"$Query`" -Path `"C:\Users`"     ← your personal files only" -ForegroundColor DarkGray
+            Write-Host "     ai-search `"$Query`" -Path `"C:\Projects`"  ← your projects only"       -ForegroundColor DarkGray
+            Write-Host "     ai-search `"$Query`" -Path `"D:\`"          ← a specific drive"          -ForegroundColor DarkGray
+            Write-Host ""
+            $tipShown = $true
+        }
+    }
+
+    # Clear spinner line
+    Write-Host "`r                              " -NoNewline
+    Write-Host "`r" -NoNewline
+
+    # ── Collect + deduplicate results ────────────────────────────────────────
+    $seen        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $nameResults = $jobs | ForEach-Object { 
+        Receive-Job $_ -EA SilentlyContinue 
+    } | Where-Object { 
+        $_ -and $_.FullName -and $seen.Add($_.FullName) 
+    } | Sort-Object FullName
+    $jobs | Remove-Job -EA SilentlyContinue
+
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+
+    # ── Print name results ───────────────────────────────────────────────────
+    if ($nameResults.Count -gt 0) {
+        $total     = @($nameResults).Count
+        $capped    = $total -ge 50
+        $displayed = [math]::Min($total, 30)
+
+        Write-Host "  ── Files matching '$Query' ($total found$(if($capped){', showing first 30'})) ──" -ForegroundColor Cyan
+        Write-Host ""
+
+        $lastColour = ""
+        foreach ($r in ($nameResults | Select-Object -First 30)) {
+            $fileIcon = if ($r.PSIsContainer) {"📁"} else {"📄"}
+            $colour   = _Get-FileColour $r.FullName
+            $dot      = _Get-ColourDot $colour
+            $fg       = $colour  # Green/Yellow/Red map directly to Write-Host colours
+
+            # Size
+            $sizeStr = ""
+            if (-not $r.PSIsContainer -and $r.Length) {
+                $kb = [math]::Round($r.Length / 1KB, 1)
+                $sizeStr = if ($kb -ge 1024) { "$([math]::Round($kb/1024,1)) MB" } else { "$kb KB" }
+            }
+
+            # Age
+            $age = ""
+            if ($r.LastWriteTime) {
+                $days = [math]::Floor(((Get-Date) - [datetime]$r.LastWriteTime).TotalDays)
+                $age  = switch ($true) {
+                    { $days -eq 0 }    { "modified today" }
+                    { $days -eq 1 }    { "modified yesterday" }
+                    { $days -lt 30 }   { "modified ${days}d ago" }
+                    { $days -lt 365 }  { "modified $([math]::Round($days/30))mo ago" }
+                    default            { "modified $([math]::Round($days/365))yr ago" }
+                }
+            }
+
+            # Breadcrumb
+            $parts  = $r.FullName -split '\\'  | Where-Object { $_ -ne "" }
+            $crumbs = for ($i = 0; $i -lt $parts.Count; $i++) {
+                if ($i -eq 0)                        { "💻 $($parts[$i])" }
+                elseif ($i -eq $parts.Count - 1 -and -not $r.PSIsContainer) { "📄 $($parts[$i])" }
+                else                                 { "📂 $($parts[$i])" }
+            }
+            $breadcrumb = $crumbs -join " › "
+
+            # Print file line
+            Write-Host "  $dot $fileIcon $($r.FullName)" -ForegroundColor $fg
+            Write-Host "     $breadcrumb" -ForegroundColor DarkGray
+            if ($sizeStr -or $age) {
+                Write-Host "     📊 $(($sizeStr, $age | Where-Object { $_ }) -join ' · ')" -ForegroundColor DarkGray
+            }
+
+            # Contextual message — once per colour group
+            if ($colour -ne $lastColour) {
+                $msg    = _Get-ColourMessage $colour $r.FullName
+                $msgFg  = switch ($colour) { "Green"{"DarkGreen"} "Yellow"{"DarkYellow"} "Red"{"DarkRed"} }
+                Write-Host $msg -ForegroundColor $msgFg
+                $lastColour = $colour
+            }
+            Write-Host ""
+        }
+
+        if ($capped) {
+            Write-Host "  [~] More than 30 results — use -Path to narrow down." -ForegroundColor DarkYellow
+            Write-Host ""
+        }
+
+        Write-Host "  ⏱  Completed in ${elapsed}s" -ForegroundColor DarkGray
+
+        # Reprint tip at bottom if it was shown mid-search (so it's not buried)
+        if ($tipShown) {
+            Write-Host ""
+            Write-Host "  💡 Reminder: use -Path to speed up future searches:" -ForegroundColor DarkYellow
+            Write-Host "     ai-search `"$Query`" -Path `"C:\Users`"" -ForegroundColor DarkGray
+        }
+
+    } else {
+        Write-Host "  [~] No files found matching '$Query' 💻" -ForegroundColor Yellow
+        Write-Host ""
+
+        # Admin hint if searching system territory or global with no results
+        if ($isGlobal -or $Path -match '^[A-Z]:\\(Program Files|Windows)') {
+            Write-Host "  [~] Some system folders need admin rights to scan." -ForegroundColor DarkGray
+            Write-Host "      Try: open PowerShell as Administrator and search again." -ForegroundColor DarkGray
+            Write-Host ""
+        }
+        if (-not $Content) {
+            Write-Host "  💡 Try -Content to search inside files:" -ForegroundColor DarkGray
+            Write-Host "     ai-search `"$Query`" -Content" -ForegroundColor DarkGray
+        }
+
+        Write-Host "  ⏱  Completed in ${elapsed}s" -ForegroundColor DarkGray
+    }
+
+    # ── Content search ───────────────────────────────────────────────────────
     if ($Content) {
         Write-Host ""
         Write-Host "  ── Files containing '$Query' ────────────────────────" -ForegroundColor Cyan
         Write-Host ""
 
-        $allFiles = @(foreach ($root in $searchRoots) {
-            Get-ChildItem $root -Recurse -EA SilentlyContinue -Include @(
-                "*.txt","*.java","*.py","*.md","*.xml","*.json",
-                "*.ps1","*.cs","*.js","*.html","*.ts","*.yaml","*.yml"
-            )
-        })
+        $contentExts = @("*.txt","*.java","*.py","*.md","*.xml","*.json","*.ps1",
+                         "*.cs","*.js","*.ts","*.html","*.css","*.yaml","*.yml",
+                         "*.sh","*.rb","*.go","*.rs","*.properties","*.gradle","*.sql")
 
-        if (-not $allFiles) {
-            Write-Host "  [~] No searchable files found." -ForegroundColor Yellow
+        $allFiles = foreach ($root in $searchRoots) {
+            Get-ChildItem $root -Recurse -Include $contentExts -EA SilentlyContinue
+        }
+
+        if (-not $allFiles -or @($allFiles).Count -eq 0) {
+            Write-Host "  [~] No searchable text files found." -ForegroundColor Yellow
         } else {
-            $contentResults = $allFiles |
-                Select-Object -ExpandProperty FullName |
-                Select-String -Pattern ([regex]::Escape($Query)) -EA SilentlyContinue |
-                Select-Object -First 50
+            $contentResults = Select-String `
+                -Path ($allFiles | Select-Object -ExpandProperty FullName) `
+                -Pattern ([regex]::Escape($Query)) `
+                -CaseSensitive:$false `
+                -EA SilentlyContinue | 
+                Select-Object -First 20
 
-            if ($contentResults) {
+            if ($contentResults -and @($contentResults).Count -gt 0) {
+                $lastColour = ""
                 foreach ($r in $contentResults) {
-                    $risk  = _SC-FileRisk $r.Path
-                    $crumb = _SC-Breadcrumb $r.Path "📝"
-                    Write-Host "  $($risk.Icon) 📝 $($r.Path)" -ForegroundColor $risk.Color
-                    Write-Host $crumb -ForegroundColor DarkCyan
-                    Write-Host "     Line $($r.LineNumber): $($r.Line.Trim())" -ForegroundColor Gray
-                    if ($risk.Warning -ne "") {
-                        Write-Host "     ⚠  $($risk.Warning)" -ForegroundColor $risk.Color
+                    $colour = _Get-FileColour $r.Path
+                    $dot    = _Get-ColourDot $colour
+                    $fg     = $colour
+                    Write-Host "  $dot 📝 $($r.Path)" -ForegroundColor $fg
+                    Write-Host "     Line $($r.LineNumber): $($r.Line.Trim())" -ForegroundColor DarkGray
+                    if ($colour -ne $lastColour) {
+                        $msg   = _Get-ColourMessage $colour $r.Path
+                        $msgFg = switch ($colour) { "Green"{"DarkGreen"} "Yellow"{"DarkYellow"} "Red"{"DarkRed"} }
+                        Write-Host $msg -ForegroundColor $msgFg
+                        $lastColour = $colour
                     }
                     Write-Host ""
                 }
             } else {
                 Write-Host "  [~] No content matches for '$Query'." -ForegroundColor Yellow
-                Write-Host "      Try a shorter keyword or check the spelling." -ForegroundColor DarkGray
+                Write-Host "      Try a shorter or different keyword." -ForegroundColor DarkGray
             }
         }
     }
 
     Write-Host ""
- }
+}
 
 function ai-fix {
     <#
@@ -2015,17 +2140,22 @@ $c
 # ════════════════════════════════════════════════════════════════════════════
 
 function _SC-GitCheck {
-    # Returns $true if inside a git repo, prints fix guide and returns $false otherwise
-    $check = git rev-parse --is-inside-work-tree 2>&1
-    if (($check).Trim() -ne "true") {
-        Write-Host ""
-        Write-Host "  [✗] You are not inside a Git repository." -ForegroundColor Red
-        Write-Host "      Navigate to your project folder first:  cd C:\your\project" -ForegroundColor DarkGray
-        Write-Host "      To start a new repo here:  git init" -ForegroundColor DarkGray
-        Write-Host ""
+    try {
+        $out = & git rev-parse --is-inside-work-tree 2>&1
+        $str = ($out | Out-String).Trim()
+        if ($str -ne "true") {
+            Write-Host ""
+            Write-Host "  [✗] You are not inside a Git repository." -ForegroundColor Red
+            Write-Host "      Navigate to your project folder first:  cd C:\your\project" -ForegroundColor DarkGray
+            Write-Host "      To start a new repo here:  git init" -ForegroundColor DarkGray
+            Write-Host ""
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Host "  [✗] Git is not installed or not on PATH." -ForegroundColor Red
         return $false
     }
-    return $true
 }
 
 function ai-diff {
@@ -2037,7 +2167,7 @@ function ai-diff {
     #>
     _SC-Track "ai-diff"
     if (-not (_SC-GitCheck)) { return }
-    $diff = ((git diff 2>&1) + "`n" + (git diff --staged 2>&1)).Trim()
+    $diff = (((git diff 2>&1) | Out-String) + "`n" + ((git diff --staged 2>&1) | Out-String)).Trim()
     if ([string]::IsNullOrWhiteSpace($diff)) {
         Write-Host ""; Write-Host "  [~] No changes found — working tree is clean." -ForegroundColor Yellow
         Write-Host "      Make and save some edits first, then run  ai-diff  again." -ForegroundColor DarkGray; return
@@ -2058,7 +2188,7 @@ function ai-commit {
     #>
     _SC-Track "ai-commit"
     if (-not (_SC-GitCheck)) { return }
-    $diff = (git diff --staged 2>&1).Trim()
+    $diff = ((git diff --staged 2>&1) | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($diff)) {
         Write-Host ""
         Write-Host "  [~] No staged changes to generate a commit message from." -ForegroundColor Yellow
@@ -2088,7 +2218,7 @@ function ai-git-push {
     #>
     _SC-Track "ai-git-push"
     if (-not (_SC-GitCheck)) { return }
-    $status = (git status --porcelain 2>&1).Trim()
+    $status = ((git status --porcelain 2>&1) | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($status)) {
         Write-Host ""; Write-Host "  [~] Nothing to commit — working tree is clean." -ForegroundColor Yellow; return
     }
@@ -2399,7 +2529,7 @@ function ai-explain {
     ai-explain "HashMap vs LinkedHashMap"
     ai-explain "what is a race condition"
     #>
-    param([Parameter(Mandatory)][string]$Input)
+    param([Parameter(Mandatory)][string]$Query)
     _SC-Track "ai-explain"
     Write-Host ""; Write-Host "  [ ai-explain ] Breaking down..." -ForegroundColor DarkCyan
     _SC-Ask -Prompt @"
@@ -2413,10 +2543,10 @@ Structure:
 5. Common mistake or gotcha
 
 Input:
-───
-$Input
-───
-"@ -FallbackPrompt "Explain this in simple terms with an example: $Input" | Out-Null
+---
+$Query
+---
+"@ -FallbackPrompt "Explain this in simple terms with an example: $Query" | Out-Null
 }
 
 function ai-cheatsheet {
@@ -2503,38 +2633,35 @@ $(_SC-Trim $jd 8000)
 
 function _SC-LoadJson {
     param(
-        [string]$Path, 
+        [string]$Path,
         [ValidateSet("array", "hashtable")]
         [string]$DefaultType = "array"
     )
 
-    # Helper scriptblock so we don't repeat the default return logic 3 times
-    $ReturnDefault = { if ($DefaultType -eq "array") { return @() } else { return @{} } }
+    $emptyArray     = [object[]]@()
+    $emptyHashtable = @{}
 
     if (-not (Test-Path $Path)) {
-        & $ReturnDefault
+    if ($DefaultType -eq "array") { return ,[object[]]@() } else { return @{} }
     }
 
     try {
-        # Added -ErrorAction Stop to guarantee the catch block catches file read errors
         $raw = Get-Content $Path -Raw -Encoding UTF8 -ErrorAction Stop
-        
-        # Guard against completely empty files which can break ConvertFrom-Json
+
         if ([string]::IsNullOrWhiteSpace($raw)) {
-            & $ReturnDefault
+           if ($DefaultType -eq "array") { return ,[object[]]@() } else { return @{} }
         }
 
-        if ($DefaultType -eq "array") { 
-            return @(ConvertFrom-Json $raw) 
+        if ($DefaultType -eq "array") {
+            return [object[]]@(ConvertFrom-Json $raw)
         } else {
-            # Note: If using PS Core (v6+), change the next 4 lines to: return (ConvertFrom-Json $raw -AsHashtable)
             $obj  = ConvertFrom-Json $raw
             $hash = @{}
             $obj.PSObject.Properties | ForEach-Object { $hash[$_.Name] = $_.Value }
             return $hash
         }
-    } catch { 
-        & $ReturnDefault 
+    } catch {
+    if ($DefaultType -eq "array") { return ,[object[]]@() } else { return @{} }
     }
 }
 
@@ -2555,8 +2682,10 @@ function ai-note {
     param([Parameter(Mandatory)][string]$Text)
     _SC-Track "ai-note"
     $f     = Join-Path $Global:SC_DATA_DIR "sc_notes.json"
-    $notes = _SC-LoadJson $f "array"
-    $notes += [PSCustomObject]@{ id=($notes.Count+1); time=(Get-Date -Format "yyyy-MM-dd HH:mm"); text=$Text }
+    $raw   = _SC-LoadJson $f "array"
+    $notes = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $raw) { $notes.Add($item) }
+    $notes.Add([PSCustomObject]@{ id=($notes.Count+1); time=(Get-Date -Format "yyyy-MM-dd HH:mm"); text=$Text })
     _SC-SaveJson $f $notes
     Write-Host "  [✓] Note #$($notes.Count) saved: '$Text'" -ForegroundColor Green
 }
@@ -2610,8 +2739,10 @@ function ai-todo {
     param([Parameter(Mandatory)][string]$Task)
     _SC-Track "ai-todo"
     $f     = Join-Path $Global:SC_DATA_DIR "sc_todos.json"
-    $todos = _SC-LoadJson $f "array"
-    $todos += [PSCustomObject]@{ id=($todos.Count+1); done=$false; time=(Get-Date -Format "yyyy-MM-dd HH:mm"); task=$Task }
+    $raw   = _SC-LoadJson $f "array"
+    $todos = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $raw) { $todos.Add($item) }
+    $todos.Add([PSCustomObject]@{ id=($todos.Count+1); time=(Get-Date -Format "yyyy-MM-dd HH:mm"); text=$Text })
     _SC-SaveJson $f $todos
     Write-Host "  [✓] TODO #$($todos.Count) added: $Task" -ForegroundColor Green
     Write-Host "      View your list: ai-todos  |  Mark done: ai-done <id>" -ForegroundColor DarkGray
@@ -2701,7 +2832,9 @@ function ai-snippet {
     _SC-Track "ai-snippet"
     $f    = Join-Path $Global:SC_DATA_DIR "sc_snippets.json"
     $data = _SC-LoadJson $f "hashtable"
-
+    $copy = @{}
+    foreach ($k in $data.Keys) { $copy[$k] = $data[$k] }
+    $data = $copy
     switch ($Action.ToLower()) {
         { $_ -in "save","add" } {
             if ([string]::IsNullOrWhiteSpace($Name)) {
@@ -2888,8 +3021,8 @@ function ai-timer {
     1..3 | ForEach-Object { [Console]::Beep(880, 300); Start-Sleep -Milliseconds 200 }
 
     # Log session
-    $logs = _SC-LoadJson $logFile "array"
-    $logs += [PSCustomObject]@{ date=$start.ToString("yyyy-MM-dd HH:mm"); label=$tag; minutes=$Minutes }
+    $logs = [System.Collections.ArrayList]@(_SC-LoadJson $logFile "array")
+    $logs.Add([PSCustomObject]@{ date=$start.ToString('yyyy-MM-dd HH:mm') }) | Out-Null
     _SC-SaveJson $logFile $logs
 
     $todayStr   = Get-Date -Format "yyyy-MM-dd"
